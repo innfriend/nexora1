@@ -11,6 +11,9 @@ export interface ProceduralTextureSet {
   barrier: THREE.CanvasTexture;
   startFinish: THREE.CanvasTexture;
   buildings: THREE.CanvasTexture[];
+  buildingEmissives: THREE.CanvasTexture[];
+  buildingPodium: THREE.CanvasTexture;
+  urbanGround: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
   smokePuff: THREE.CanvasTexture;
   headlightBeam: THREE.CanvasTexture;
@@ -166,45 +169,227 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   sfctx.fillRect(0, 118, 512, 10);
   const startFinish = configureColorTexture(new THREE.CanvasTexture(sfCanvas), anisotropy);
 
-  // 6. Three skyscraper illuminated window facade styles
-  const buildings: THREE.CanvasTexture[] = [0, 1, 2].map((variant) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 512;
-    const ctx = canvas.getContext('2d')!;
-    const baseColors = ['#101624', '#141C2C', '#121621'];
-    ctx.fillStyle = baseColors[variant];
-    ctx.fillRect(0, 0, 256, 512);
+  // 6. Four Architectural Skyscraper Facade Styles (Albedo + Crisp Window-Only Emissive Maps)
+  const buildings: THREE.CanvasTexture[] = [];
+  const buildingEmissives: THREE.CanvasTexture[] = [];
 
-    const cols = variant === 1 ? 8 : 6;
-    const rows = variant === 2 ? 22 : 16;
-    const padX = 8;
-    const padY = 8;
-    const cellW = 256 / cols;
-    const cellH = 512 / rows;
+  for (let variant = 0; variant < 4; variant++) {
+    const w = 512;
+    const h = 1024;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d')!;
+
+    const eCanvas = document.createElement('canvas');
+    eCanvas.width = w;
+    eCanvas.height = h;
+    const eCtx = eCanvas.getContext('2d')!;
+    eCtx.fillStyle = '#000000';
+    eCtx.fillRect(0, 0, w, h);
+
+    // Base structural cladding / curtain wall tone
+    const baseCladding = ['#161F30', '#1C2029', '#131B26', '#211F24'][variant];
+    ctx.fillStyle = baseCladding;
+    ctx.fillRect(0, 0, w, h);
+
+    // Architectural grid proportions per facade archetype
+    const cols = [10, 8, 12, 8][variant];
+    const rows = [28, 22, 32, 24][variant];
+    const cellW = w / cols;
+    const cellH = h / rows;
+
+    // Subtle vertical cladding seam / structural pilaster background
+    for (let c = 0; c < cols; c++) {
+      const shade = c % 2 === 0 ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.14)';
+      ctx.fillStyle = shade;
+      ctx.fillRect(c * cellW, 0, cellW, h);
+    }
 
     for (let r = 0; r < rows; r++) {
-      const rowLitBias = Math.random() * 0.48 + 0.24;
-      for (let c = 0; c < cols; c++) {
-        const lit = Math.random() < rowLitBias;
-        if (lit) {
-          const warm = Math.random() < 0.64;
-          ctx.fillStyle = warm
-            ? `rgba(253, 224, 155, ${0.48 + Math.random() * 0.44})`
-            : `rgba(147, 197, 253, ${0.38 + Math.random() * 0.4})`;
-        } else {
-          ctx.fillStyle = '#1E293B';
+      const isMechFloor =
+        (variant === 0 && (r === 9 || r === 19)) ||
+        (variant === 2 && (r === 10 || r === 21));
+      const isSkyLobby = variant === 0 && r === 14;
+
+      if (isMechFloor) {
+        // Louvered mechanical equipment floor (dark vents + subtle warning band)
+        ctx.fillStyle = '#0B0F17';
+        ctx.fillRect(0, r * cellH, w, cellH);
+        ctx.fillStyle = '#1E293B';
+        for (let lx = 6; lx < w; lx += 14) {
+          ctx.fillRect(lx, r * cellH + 5, 7, cellH - 10);
         }
-        ctx.fillRect(
-          c * cellW + padX * 0.5,
-          r * cellH + padY * 0.5,
-          cellW - padX,
-          cellH - padY,
-        );
+        continue;
+      }
+
+      // Horizontal floor spandrel beam & metallic sill highlight
+      const spandrelH = variant === 1 ? 12 : 8;
+      ctx.fillStyle = variant === 1 ? '#29303D' : '#0E1522';
+      ctx.fillRect(0, r * cellH, w, spandrelH);
+      ctx.fillStyle = variant === 1 ? 'rgba(226, 200, 150, 0.16)' : 'rgba(148, 163, 184, 0.12)';
+      ctx.fillRect(0, r * cellH + spandrelH, w, 2);
+
+      // Coherent floor occupancy (clusters of lit offices / apartments)
+      const floorOccupancy = isSkyLobby ? 0.88 : 0.22 + ((r * 37 + variant * 13) % 10) * 0.055;
+      const roomRun = 2 + ((r * 7 + variant) % 3);
+      let suiteLit = false;
+      let suiteWarm = true;
+      let suiteAlpha = 0.7;
+
+      for (let c = 0; c < cols; c++) {
+        if (c % roomRun === 0) {
+          suiteLit = Math.random() < floorOccupancy;
+          suiteWarm = variant === 3 ? Math.random() < 0.82 : Math.random() < 0.56;
+          suiteAlpha = 0.45 + Math.random() * 0.48;
+        }
+
+        const winPadX = variant === 1 ? 7 : 4;
+        const winX = c * cellW + winPadX;
+        const winY = r * cellH + spandrelH + 3;
+        const winW = cellW - winPadX * 2;
+        const winH = cellH - spandrelH - 5;
+
+        if (suiteLit) {
+          // Warm tungsten office / cool daylight LED / cyan tech glow
+          const tint =
+            variant === 2 && !suiteWarm
+              ? `rgba(103, 232, 249, ${suiteAlpha})`
+              : suiteWarm
+                ? `rgba(253, 224, 155, ${suiteAlpha})`
+                : `rgba(186, 230, 253, ${suiteAlpha})`;
+          ctx.fillStyle = tint;
+          ctx.fillRect(winX, winY, winW, winH);
+
+          // Subtle interior ceiling fixture bar & blinds shadow at top 25%
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.24)';
+          ctx.fillRect(winX, winY + winH * 0.68, winW, winH * 0.32);
+
+          eCtx.fillStyle = tint;
+          eCtx.fillRect(winX, winY, winW, winH * 0.88);
+        } else {
+          // Dark tinted architectural glass with subtle sky reflection gradient
+          const glassGrad = ctx.createLinearGradient(0, winY, 0, winY + winH);
+          glassGrad.addColorStop(0, variant === 0 ? '#24354F' : '#1E293B');
+          glassGrad.addColorStop(1, '#0D131F');
+          ctx.fillStyle = glassGrad;
+          ctx.fillRect(winX, winY, winW, winH);
+        }
+
+        // Fine inner window mullion divider
+        if (variant !== 1 && winW > 22) {
+          ctx.fillStyle = 'rgba(12, 16, 24, 0.68)';
+          ctx.fillRect(winX + winW * 0.5 - 1, winY, 2, winH);
+          eCtx.fillStyle = '#000000';
+          eCtx.fillRect(winX + winW * 0.5 - 1, winY, 2, winH);
+        }
+
+        // Residential balcony guardrail bar on variant 3
+        if (variant === 3 && c % 2 === 1) {
+          ctx.fillStyle = '#0B0E14';
+          ctx.fillRect(c * cellW + 2, winY + winH - 7, cellW - 4, 4);
+          eCtx.fillStyle = '#000000';
+          eCtx.fillRect(c * cellW + 2, winY + winH - 7, cellW - 4, 4);
+        }
+      }
+
+      // Vertical corner mullions / concrete piers
+      if (variant === 1 || variant === 2) {
+        ctx.fillStyle = variant === 1 ? '#2E3440' : '#0F172A';
+        ctx.fillRect(0, r * cellH, 10, cellH);
+        ctx.fillRect(w - 10, r * cellH, 10, cellH);
+        eCtx.fillStyle = '#000000';
+        eCtx.fillRect(0, r * cellH, 10, cellH);
+        eCtx.fillRect(w - 10, r * cellH, 10, cellH);
       }
     }
-    return configureColorTexture(new THREE.CanvasTexture(canvas), anisotropy);
-  });
+
+    // Subtle structural accent LED vertical rib on tech tower variant 2
+    if (variant === 2) {
+      ctx.fillStyle = '#38BDF8';
+      ctx.fillRect(14, 0, 3, h);
+      ctx.fillRect(w - 17, 0, 3, h);
+      eCtx.fillStyle = '#38BDF8';
+      eCtx.fillRect(14, 0, 3, h);
+      eCtx.fillRect(w - 17, 0, 3, h);
+    }
+
+    buildings.push(configureColorTexture(new THREE.CanvasTexture(canvas), anisotropy));
+    buildingEmissives.push(configureColorTexture(new THREE.CanvasTexture(eCanvas), anisotropy));
+  }
+
+  // 6b. Street-Level Retail & Grand Lobby Podium Facade
+  const podCanvas = document.createElement('canvas');
+  podCanvas.width = 512;
+  podCanvas.height = 256;
+  const pCtx = podCanvas.getContext('2d')!;
+  pCtx.fillStyle = '#141923';
+  pCtx.fillRect(0, 0, 512, 256);
+
+  // Granite mezzanine frieze & warm cornice bar
+  pCtx.fillStyle = '#262E3D';
+  pCtx.fillRect(0, 0, 512, 34);
+  pCtx.fillStyle = '#F59E0B';
+  pCtx.fillRect(0, 34, 512, 5);
+
+  // Ground-floor double-height glass arcade bays separated by stone columns
+  const podCols = 6;
+  const podBayW = 512 / podCols;
+  for (let i = 0; i < podCols; i++) {
+    const bx = i * podBayW;
+    // Stone column pier
+    pCtx.fillStyle = '#222938';
+    pCtx.fillRect(bx, 39, 14, 217);
+    // Warm lit storefront / lobby glass
+    const storeGrad = pCtx.createLinearGradient(0, 52, 0, 240);
+    storeGrad.addColorStop(0, i % 2 === 0 ? 'rgba(253, 224, 155, 0.85)' : 'rgba(186, 230, 253, 0.72)');
+    storeGrad.addColorStop(0.55, 'rgba(30, 41, 59, 0.92)');
+    storeGrad.addColorStop(1, '#0F172A');
+    pCtx.fillStyle = storeGrad;
+    pCtx.fillRect(bx + 16, 48, podBayW - 20, 192);
+    // Transom mullion
+    pCtx.fillStyle = '#0B0F17';
+    pCtx.fillRect(bx + 16, 128, podBayW - 20, 6);
+  }
+  // Granite base plinth
+  pCtx.fillStyle = '#0B0E14';
+  pCtx.fillRect(0, 236, 512, 20);
+  const buildingPodium = configureColorTexture(new THREE.CanvasTexture(podCanvas), anisotropy, 2, 1);
+
+  // 6c. Urban City Block & Plaza Sidewalk Ground Grid
+  const ugCanvas = document.createElement('canvas');
+  ugCanvas.width = 512;
+  ugCanvas.height = 512;
+  const uCtx = ugCanvas.getContext('2d')!;
+  uCtx.fillStyle = '#0F141D';
+  uCtx.fillRect(0, 0, 512, 512);
+  // Subtle cross-street dark avenues
+  uCtx.fillStyle = '#090C12';
+  uCtx.fillRect(0, 0, 512, 36);
+  uCtx.fillRect(0, 246, 512, 24);
+  uCtx.fillRect(0, 0, 36, 512);
+  uCtx.fillRect(246, 0, 24, 512);
+  // Concrete sidewalk curbs around city blocks
+  uCtx.strokeStyle = '#252E3E';
+  uCtx.lineWidth = 4;
+  uCtx.strokeRect(40, 40, 202, 202);
+  uCtx.strokeRect(274, 40, 234, 202);
+  uCtx.strokeRect(40, 274, 202, 234);
+  uCtx.strokeRect(274, 274, 234, 234);
+  // Faint plaza tile grid
+  uCtx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
+  uCtx.lineWidth = 1;
+  for (let p = 64; p < 512; p += 32) {
+    uCtx.beginPath();
+    uCtx.moveTo(p, 0);
+    uCtx.lineTo(p, 512);
+    uCtx.stroke();
+    uCtx.beginPath();
+    uCtx.moveTo(0, p);
+    uCtx.lineTo(512, p);
+    uCtx.stroke();
+  }
+  const urbanGround = configureColorTexture(new THREE.CanvasTexture(ugCanvas), anisotropy, 16, 16);
 
   // 7. Soft Radial Contact Shadow under cars
   const shadowCanvas = document.createElement('canvas');
@@ -385,6 +570,9 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     barrier,
     startFinish,
     buildings,
+    buildingEmissives,
+    buildingPodium,
+    urbanGround,
     contactShadow,
     smokePuff,
     headlightBeam,
@@ -401,6 +589,9 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       barrier.dispose();
       startFinish.dispose();
       buildings.forEach((b) => b.dispose());
+      buildingEmissives.forEach((e) => e.dispose());
+      buildingPodium.dispose();
+      urbanGround.dispose();
       contactShadow.dispose();
       smokePuff.dispose();
       headlightBeam.dispose();

@@ -7,13 +7,17 @@ import {
   Circle,
   Flame,
   Gauge,
+  Lock,
   Play,
   ShieldAlert,
   Sliders,
   Trophy,
+  Wrench,
   Zap,
 } from 'lucide-react';
 import { formatCountdownHms, getMsUntilNextDay } from '../game/dailyChallenge';
+import { getCarDefinition } from '../game/garageData';
+import { getDriverRankInfo } from '../game/progression';
 import { formatRaceTime, getBestRaceKey } from '../game/storage';
 import { getMinimapPreviewForLayout } from '../game/trackLayouts';
 import {
@@ -24,6 +28,7 @@ import {
   GameMode,
   GameSettings,
   GameTitle,
+  PlayerProfile,
 } from '../game/types';
 import { NexoraLogo } from './NexoraLogo';
 
@@ -32,6 +37,7 @@ interface LandingOverlayProps {
   selectedMode: GameMode;
   settings: GameSettings;
   records: BestRecords;
+  profile: PlayerProfile;
   dailyChallenge: DailyChallengeSnapshot;
   webglError: string | null;
   fallbackImageSrc: string;
@@ -40,6 +46,7 @@ interface LandingOverlayProps {
   onSelectDifficulty: (difficulty: Difficulty) => void;
   onSelectLivery: (liveryId: string) => void;
   onStartRace: () => void;
+  onOpenGarage: () => void;
   onOpenHowToPlay: () => void;
   onOpenSettings: () => void;
   onOpenAbout: () => void;
@@ -118,6 +125,7 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
   selectedMode,
   settings,
   records,
+  profile,
   dailyChallenge,
   webglError,
   fallbackImageSrc,
@@ -126,6 +134,7 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
   onSelectDifficulty,
   onSelectLivery,
   onStartRace,
+  onOpenGarage,
   onOpenHowToPlay,
   onOpenSettings,
   onOpenAbout,
@@ -134,6 +143,8 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
   const bestRaceTime = bestRaceKey ? (records[bestRaceKey] as number | null) : null;
   const activeGameMeta =
     GAME_CATALOG.find((g) => g.id === selectedGame) ?? GAME_CATALOG[0];
+  const driverRank = getDriverRankInfo(profile.xp);
+  const activeCar = getCarDefinition(profile.selectedCarId);
 
   const [resetCountdown, setResetCountdown] = useState(() =>
     formatCountdownHms(getMsUntilNextDay()),
@@ -213,6 +224,13 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
           </a>
           <button
             type="button"
+            onClick={onOpenGarage}
+            className="hover:text-amber-300 text-amber-400 font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            Garage
+          </button>
+          <button
+            type="button"
             onClick={onOpenHowToPlay}
             className="hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -224,13 +242,6 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
             className="hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Settings
-          </button>
-          <button
-            type="button"
-            onClick={onOpenAbout}
-            className="hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            About
           </button>
         </nav>
 
@@ -444,21 +455,35 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
 
                 <div className="flex items-center gap-2.5">
                   <span className="text-xs text-slate-400 font-medium">Car Paint:</span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     {CAR_LIVERIES.map((liv) => {
                       const active = settings.liveryId === liv.id;
+                      const unlocked =
+                        liv.priceCredits === 0 || profile.unlockedLiveries.includes(liv.id);
                       return (
                         <button
                           key={liv.id}
                           type="button"
-                          title={liv.name}
+                          title={unlocked ? liv.name : `${liv.name} (Unlock in Garage)`}
                           aria-label={`Select ${liv.name} paint`}
-                          onClick={() => onSelectLivery(liv.id)}
-                          className={`w-7 h-7 rounded-lg border-2 transition-transform cursor-pointer ${
-                            active ? 'border-white scale-110' : 'border-white/25 hover:scale-105'
+                          onClick={() => {
+                            if (unlocked) {
+                              onSelectLivery(liv.id);
+                            } else {
+                              onOpenGarage();
+                            }
+                          }}
+                          className={`relative w-7 h-7 rounded-lg border-2 flex items-center justify-center transition-transform cursor-pointer ${
+                            active
+                              ? 'border-white scale-110'
+                              : unlocked
+                                ? 'border-white/25 hover:scale-105'
+                                : 'border-white/15 opacity-70 hover:opacity-100'
                           }`}
                           style={{ backgroundColor: liv.bodyHex }}
-                        />
+                        >
+                          {!unlocked && <Lock className="w-3 h-3 text-white drop-shadow" />}
+                        </button>
                       );
                     })}
                   </div>
@@ -466,8 +491,33 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
               </div>
             </div>
 
+            {/* Active Driver / Garage Status Strip */}
+            <div className="max-w-xl bg-[#11151E]/92 border border-white/12 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="font-display font-bold text-sm text-white truncate">
+                  {activeCar.name}
+                </span>
+                <span className="text-xs text-slate-400 truncate">
+                  · {driverRank.name}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 font-mono-tabular text-xs">
+                <span className="font-bold text-amber-400">
+                  {profile.credits.toLocaleString()} CR
+                </span>
+                <button
+                  type="button"
+                  onClick={onOpenGarage}
+                  className="inline-flex items-center gap-1 text-orange-400 hover:text-orange-300 font-semibold cursor-pointer"
+                >
+                  <span>Tune &amp; Unlock</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
             {/* Primary CTA + Quick Action Links */}
-            <div className="flex flex-wrap items-center gap-3 pt-1">
+            <div className="flex flex-wrap items-center gap-3 pt-0.5">
               <button
                 type="button"
                 onClick={onStartRace}
@@ -481,10 +531,11 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
 
               <button
                 type="button"
-                onClick={onOpenHowToPlay}
-                className="inline-flex items-center gap-2 px-4 py-3.5 rounded-xl bg-[#11151E]/90 border border-white/15 hover:border-white/30 text-sm font-semibold text-slate-200 transition-colors whitespace-nowrap cursor-pointer"
+                onClick={onOpenGarage}
+                className="inline-flex items-center gap-2 px-4 py-3.5 rounded-xl bg-[#11151E]/90 border border-amber-500/40 hover:border-amber-400 text-sm font-semibold text-amber-300 transition-colors whitespace-nowrap cursor-pointer"
               >
-                <span>How to Play</span>
+                <Wrench className="w-4 h-4" />
+                <span>Garage &amp; Upgrades</span>
               </button>
 
               <button
@@ -792,6 +843,9 @@ export const LandingOverlay: React.FC<LandingOverlayProps> = ({
       <footer className="relative z-10 flex flex-wrap items-center justify-between gap-4 px-5 py-3.5 sm:px-10 border-t border-white/10 bg-[#090B10]/80 text-xs text-slate-400">
         <span>© {new Date().getFullYear()} Nexora Games · Independent Browser Racing</span>
         <div className="flex md:hidden items-center gap-4 text-slate-300">
+          <button type="button" onClick={onOpenGarage} className="text-amber-400 font-semibold cursor-pointer">
+            Garage
+          </button>
           <button type="button" onClick={onOpenHowToPlay} className="hover:text-white cursor-pointer">
             How to Play
           </button>

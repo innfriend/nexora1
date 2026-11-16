@@ -71,6 +71,7 @@ export class ReplayRecorder {
         steerLeft: playerInput.steerLeft,
         steerRight: playerInput.steerRight,
         handbrake: playerInput.handbrake,
+        nitro: Boolean(playerInput.nitro),
       },
       playerLap,
       playerPosition,

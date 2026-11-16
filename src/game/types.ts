@@ -16,6 +16,14 @@ export type GamePhase = 'menu' | 'countdown' | 'racing' | 'paused' | 'finished' 
 
 export type ReplayCameraMode = 'chase' | 'broadcast' | 'orbit';
 
+export type CarId = 'gt3-r' | 'vortex-rs' | 'spectre-v10' | 'phantom-apex';
+
+export type UpgradeSlot = 'engine' | 'tires' | 'gearbox' | 'nitro';
+
+export type UnderglowId = 'none' | 'orange' | 'cyan' | 'crimson' | 'gold';
+
+export type WingStyleId = 'gt3' | 'drag' | 'twin-track';
+
 export interface ReplayStatus {
   playing: boolean;
   currentTimeMs: number;
@@ -39,6 +47,7 @@ export interface CarLivery {
   bodyHex: string;
   accentHex: string;
   rimHex: string;
+  priceCredits: number;
 }
 
 export const CAR_LIVERIES: CarLivery[] = [
@@ -48,6 +57,7 @@ export const CAR_LIVERIES: CarLivery[] = [
     bodyHex: '#E84A1B',
     accentHex: '#1E2430',
     rimHex: '#CBD5E1',
+    priceCredits: 0,
   },
   {
     id: 'crimson-gt',
@@ -55,6 +65,7 @@ export const CAR_LIVERIES: CarLivery[] = [
     bodyHex: '#DC2626',
     accentHex: '#18181B',
     rimHex: '#E2E8F0',
+    priceCredits: 0,
   },
   {
     id: 'cobalt-pulse',
@@ -62,6 +73,7 @@ export const CAR_LIVERIES: CarLivery[] = [
     bodyHex: '#2563EB',
     accentHex: '#0F172A',
     rimHex: '#F1F5F9',
+    priceCredits: 0,
   },
   {
     id: 'obsidian-gold',
@@ -69,8 +81,112 @@ export const CAR_LIVERIES: CarLivery[] = [
     bodyHex: '#1C2029',
     accentHex: '#F59E0B',
     rimHex: '#D97706',
+    priceCredits: 0,
+  },
+  {
+    id: 'emerald-spec',
+    name: 'Emerald Spec',
+    bodyHex: '#059669',
+    accentHex: '#0F172A',
+    rimHex: '#E2E8F0',
+    priceCredits: 450,
+  },
+  {
+    id: 'midnight-violet',
+    name: 'Midnight Violet',
+    bodyHex: '#6D28D9',
+    accentHex: '#111827',
+    rimHex: '#38BDF8',
+    priceCredits: 600,
+  },
+  {
+    id: 'titanium-frost',
+    name: 'Titanium Frost',
+    bodyHex: '#94A3B8',
+    accentHex: '#0F172A',
+    rimHex: '#F97316',
+    priceCredits: 750,
+  },
+  {
+    id: 'solar-hyper',
+    name: 'Solar Hyper',
+    bodyHex: '#F59E0B',
+    accentHex: '#111827',
+    rimHex: '#0F172A',
+    priceCredits: 950,
   },
 ];
+
+export interface CarSpecDefinition {
+  id: CarId;
+  name: string;
+  category: string;
+  tagline: string;
+  priceCredits: number;
+  defaultColor: string;
+  topSpeedMult: number;
+  accelMult: number;
+  handlingMult: number;
+  driftGripMult: number;
+  nitroCapacity: number;
+  nitroPowerMult: number;
+  nitroRefillMult: number;
+  displayRatings: {
+    speed: number; // 1..100
+    accel: number;
+    handling: number;
+    nitro: number;
+  };
+}
+
+export interface EffectiveCarSpecs {
+  carId: CarId;
+  carName: string;
+  topSpeedMult: number;
+  accelMult: number;
+  handlingMult: number;
+  driftGripMult: number;
+  nitroCapacity: number;
+  nitroPowerMult: number;
+  nitroRefillMult: number;
+  ratings: {
+    speed: number;
+    accel: number;
+    handling: number;
+    nitro: number;
+  };
+}
+
+export interface PlayerProfile {
+  credits: number;
+  xp: number;
+  unlockedCars: CarId[];
+  selectedCarId: CarId;
+  unlockedLiveries: string[];
+  underglowId: UnderglowId;
+  wingStyle: WingStyleId;
+  upgrades: Record<UpgradeSlot, number>;
+  unlockedBadges: string[];
+  stats: {
+    circuitWins: number;
+    perfectLaunches: number;
+    nitroTriggers: number;
+    slipstreamPasses: number;
+    totalDistanceKm: number;
+  };
+}
+
+export interface RaceEarningsSummary {
+  creditsEarned: number;
+  xpEarned: number;
+  breakdown: Array<{ label: string; credits: number }>;
+  newlyUnlockedBadges: string[];
+  previousXp: number;
+  newXp: number;
+  previousRank: string;
+  newRank: string;
+  leveledUp: boolean;
+}
 
 export interface GameSettings {
   quality: QualityPreset;
@@ -88,6 +204,7 @@ export interface InputState {
   steerLeft: boolean;
   steerRight: boolean;
   handbrake: boolean;
+  nitro: boolean;
 }
 
 export interface MinimapMarker {
@@ -162,6 +279,16 @@ export interface HudTelemetry {
   distanceKm?: number;
   timeRemainingMs?: number;
   driftZonesHit?: number;
+  // Addictive Risk-Reward & Timing telemetry
+  nitroRatio: number; // 0..1
+  nitroActive: boolean;
+  slipstreamActive: boolean;
+  oncomingActive?: boolean;
+  launchGauge?: number; // 0..1 during countdown
+  launchZone?: [number, number];
+  splitDeltaMs?: number | null;
+  splitDeltaSeq?: number;
+  ghostActive?: boolean;
 }
 
 export interface RaceStanding {
@@ -198,6 +325,7 @@ export interface RaceResult {
   standings: RaceStanding[];
   hasReplay: boolean;
   dailySummary?: DailyChallengeResultSummary;
+  earnings?: RaceEarningsSummary;
   // Arcade result fields (Highway Rush & Drift King)
   score?: number;
   previousBestScore?: number | null;

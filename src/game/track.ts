@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildArchitecturalSkyline, CitySkylinePlacement } from './cityArchitecture';
 import { ProceduralTextureSet } from './textures';
 import { getTrackLayoutConfig } from './trackLayouts';
 import { TrackLayoutId } from './types';
@@ -95,14 +96,14 @@ export function createCityCircuit(
   );
   group.add(new THREE.Mesh(skyGeo, skyMat));
 
-  // 2. Base Urban Ground Plane (below road level so road never Z-fights)
+  // 2. Base Urban City-Block Ground Plane (below road level so road never Z-fights)
   const groundGeo = trackGeo(new THREE.PlaneGeometry(1100, 1100));
   groundGeo.rotateX(-Math.PI / 2);
   const groundMat = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x11151d,
-      roughness: 0.95,
-      metalness: 0.05,
+      map: textures.urbanGround,
+      roughness: 0.92,
+      metalness: 0.08,
     }),
   );
   const groundMesh = new THREE.Mesh(groundGeo, groundMat);
@@ -482,7 +483,7 @@ export function createCityCircuit(
     return seed / 4294967296;
   };
 
-  const placements: Array<{ x: number; z: number; w: number; h: number; d: number; rot: number; variant: number }> = [];
+  const placements: CitySkylinePlacement[] = [];
   for (let attempt = 0; attempt < 900 && placements.length < 115; attempt++) {
     const angle = rand() * Math.PI * 2;
     const radius = 35 + rand() * 290;
@@ -507,7 +508,7 @@ export function createCityCircuit(
     }
     if (overlaps) continue;
 
-    const h = 28 + rand() * 88;
+    const h = 30 + rand() * 92;
     placements.push({
       x,
       z,
@@ -515,38 +516,20 @@ export function createCityCircuit(
       h,
       d,
       rot: Math.floor(rand() * 4) * (Math.PI / 2),
-      variant: attempt % 3,
+      variant: attempt % textures.buildings.length,
+      archetype: (placements.length % 4) as 0 | 1 | 2 | 3,
     });
   }
 
-  const unitBoxGeo = trackGeo(new THREE.BoxGeometry(1, 1, 1));
-  textures.buildings.forEach((bTex, variantIdx) => {
-    const groupPlacements = placements.filter((p) => p.variant === variantIdx);
-    if (groupPlacements.length === 0) return;
-
-    const bMat = trackMat(
-      new THREE.MeshStandardMaterial({
-        map: bTex,
-        roughness: 0.45,
-        metalness: 0.35,
-        emissive: 0xffffff,
-        emissiveMap: bTex,
-        emissiveIntensity: 0.35,
-      }),
-    );
-
-    const inst = new THREE.InstancedMesh(unitBoxGeo, bMat, groupPlacements.length);
-    groupPlacements.forEach((p, idx) => {
-      dummy.position.set(p.x, p.h * 0.5 - 0.2, p.z);
-      dummy.rotation.set(0, p.rot, 0);
-      dummy.scale.set(p.w, p.h, p.d);
-      dummy.updateMatrix();
-      inst.setMatrixAt(idx, dummy.matrix);
-    });
-    inst.instanceMatrix.needsUpdate = true;
-    inst.computeBoundingSphere();
-    group.add(inst);
-  });
+  const cityArch = buildArchitecturalSkyline(
+    textures,
+    placements,
+    samples,
+    ROAD_HALF_WIDTH,
+    layoutConfig.hasUnderpassTunnel,
+    layoutConfig.skylineSeed,
+  );
+  group.add(cityArch.group);
 
   // Track query functions
   const getClosestSample = (x: number, y: number, z: number, hintIndex?: number): TrackProjection => {
@@ -636,6 +619,7 @@ export function createCityCircuit(
     getSampleAtDistance,
     getMinimapPath,
     dispose: () => {
+      cityArch.dispose();
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());
     },

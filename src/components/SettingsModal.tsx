@@ -10,12 +10,14 @@ import {
 
 interface SettingsModalProps {
   settings: GameSettings;
+  unlockedLiveries?: string[];
   onUpdate: (next: GameSettings) => void;
   onClose: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   settings,
+  unlockedLiveries,
   onUpdate,
   onClose,
 }) => {
@@ -164,24 +166,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <div className="space-y-1.5 pt-1 border-t border-white/10">
             <span className="block text-xs font-semibold text-slate-300">Vehicle Livery</span>
             <div className="grid grid-cols-2 gap-2">
-              {CAR_LIVERIES.map((liv) => (
-                <button
-                  key={liv.id}
-                  type="button"
-                  onClick={() => update({ liveryId: liv.id })}
-                  className={`flex items-center gap-2.5 px-3 py-2 rounded-xl border text-xs font-medium transition-colors cursor-pointer ${
-                    settings.liveryId === liv.id
-                      ? 'bg-orange-600/20 border-orange-500 text-white'
-                      : 'bg-[#0B0E14] border-white/10 text-slate-300 hover:border-white/25'
-                  }`}
-                >
-                  <span
-                    className="w-4 h-4 rounded-sm shrink-0 border border-white/30"
-                    style={{ backgroundColor: liv.bodyHex }}
-                  />
-                  <span className="truncate">{liv.name}</span>
-                </button>
-              ))}
+              {CAR_LIVERIES.map((liv) => {
+                const isUnlocked =
+                  liv.priceCredits === 0 ||
+                  !unlockedLiveries ||
+                  unlockedLiveries.includes(liv.id);
+                return (
+                  <button
+                    key={liv.id}
+                    type="button"
+                    disabled={!isUnlocked}
+                    onClick={() => isUnlocked && update({ liveryId: liv.id })}
+                    className={`flex items-center justify-between gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition-colors ${
+                      settings.liveryId === liv.id
+                        ? 'bg-orange-600/20 border-orange-500 text-white cursor-pointer'
+                        : isUnlocked
+                          ? 'bg-[#0B0E14] border-white/10 text-slate-300 hover:border-white/25 cursor-pointer'
+                          : 'bg-[#0B0E14]/60 border-white/8 text-slate-500 cursor-not-allowed'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="w-4 h-4 rounded-sm shrink-0 border border-white/30"
+                        style={{ backgroundColor: liv.bodyHex }}
+                      />
+                      <span className="truncate">{liv.name}</span>
+                    </span>
+                    {!isUnlocked && (
+                      <span className="text-[10px] text-amber-400 shrink-0">Garage</span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

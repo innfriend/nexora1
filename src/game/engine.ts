@@ -7,6 +7,7 @@ import {
   recordDailyAttemptStart,
   recordDailyProgress,
 } from './dailyChallenge';
+import { getEffectiveCarSpecs, UNDERGLOW_OPTIONS } from './garageData';
 import {
   computeAiInput,
   createVehicleOnGrid,
@@ -14,6 +15,15 @@ import {
   stepVehiclePhysics,
   VehicleState,
 } from './physics';
+import {
+  awardRunProgression,
+  GhostSample,
+  LapGhostData,
+  loadGhostForLayout,
+  loadPlayerProfile,
+  sampleGhostAtTime,
+  saveBestGhostForLayout,
+} from './progression';
 import {
   ReplayRecorder,
   ReplayRecording,
@@ -30,12 +40,14 @@ import {
   DailyChallengeResultSummary,
   DailyTaskStatus,
   Difficulty,
+  EffectiveCarSpecs,
   GameMode,
   GamePhase,
   GameSettings,
   GameTitle,
   HudTelemetry,
   InputState,
+  PlayerProfile,
   RaceResult,
   RaceStanding,
   ReplayCameraMode,
@@ -150,6 +162,28 @@ export class NexoraRaceEngine {
   private streakGeo!: THREE.BoxGeometry;
   private streakMat!: THREE.MeshBasicMaterial;
 
+  private profile: PlayerProfile = loadPlayerProfile();
+  private carSpecs: EffectiveCarSpecs = getEffectiveCarSpecs(this.profile);
+
+  private ghostMesh: SportsCarMeshHandles | null = null;
+  private activeGhostLap: LapGhostData | null = null;
+  private currentLapGhostSamples: GhostSample[] = [];
+  private currentLapGhostSplits: number[] = [];
+  private lastGhostSampleTimeMs = -999;
+
+  private nitroAmount = 100;
+  private nitroActive = false;
+  private wasNitroActive = false;
+  private nitroTriggersInRun = 0;
+  private slipstreamActive = false;
+  private wasSlipstreamActive = false;
+  private slipstreamPassesInRun = 0;
+  private launchGauge = 0;
+  private perfectLaunchAchieved = false;
+  private splitDeltaMs: number | null = null;
+  private splitDeltaSeq = 0;
+  private splitDeltaTimer = 0;
+
   private activeGameTitle: GameTitle = 'street-racer';
   private phase: GamePhase = 'menu';
   private mode: GameMode = 'circuit';
@@ -161,10 +195,10 @@ export class NexoraRaceEngine {
   private lastDriftResult: DriftStepOutput | null = null;
   private highwayPlayerProxy: VehicleState = {
     id: 'player',
-    name: 'You (Nexora GT3)',
+    name: 'You (Nexora GT3-R)',
     isPlayer: true,
     color: '#E84A1B',
-    x: 1.8,
+    x: -1.8,
     y: 0,
     z: 0,
     heading: 0,
@@ -178,6 +212,7 @@ export class NexoraRaceEngine {
     roadPitch: 0,
     drifting: false,
     braking: false,
+    nitroActive: false,
     trackSampleIndex: 0,
     trackDistance: 0,
     lateralOffset: 0,
@@ -210,6 +245,7 @@ export class NexoraRaceEngine {
     steerLeft: false,
     steerRight: false,
     handbrake: false,
+    nitro: false,
   };
 
   // Pre-allocated camera vectors (zero GC in render loop)
@@ -437,6 +473,33 @@ export class NexoraRaceEngine {
     }
   }
 
+  public syncProfile(nextProfile: PlayerProfile): void {
+    const prevCar = this.profile.selectedCarId;
+    const prevWing = this.profile.wingStyle;
+    const prevGlow = this.profile.underglowId;
+    this.profile = nextProfile;
+    this.carSpecs = getEffectiveCarSpecs(nextProfile);
+
+    if (this.phase === 'menu' && (prevCar !== nextProfile.selectedCarId || prevWing !== nextProfile.wingStyle || prevGlow !== nextProfile.underglowId)) {
+      if (this.activeGameTitle === 'highway-rush') {
+        this.spawnHighwayPlayerCar();
+      } else {
+        this.spawnCars(this.activeGameTitle === 'drift-king' ? 'time-trial' : 'circuit', this.settings.difficulty);
+      }
+    } else {
+      const player = this.actors.find((a) => a.state.isPlayer);
+      if (player?.mesh.underglowMat) {
+        const glowHex = UNDERGLOW_OPTIONS.find((u) => u.id === nextProfile.underglowId)?.hex ?? null;
+        if (glowHex) {
+          player.mesh.underglowMat.color.set(glowHex);
+          player.mesh.underglowMat.opacity = 0.62;
+        } else {
+          player.mesh.underglowMat.opacity = 0;
+        }
+      }
+    }
+  }
+
   public updateSettings(next: GameSettings): void {
     const liveryChanged = next.liveryId !== this.settings.liveryId;
     this.settings = { ...next };
@@ -463,10 +526,19 @@ export class NexoraRaceEngine {
     this.input.steerLeft = false;
     this.input.steerRight = false;
     this.input.handbrake = false;
+    this.input.nitro = false;
   }
 
   public getMinimapInfo() {
     return this.circuit ? this.circuit.getMinimapPath() : { points: [], bounds: { minX: -150, maxX: 170, minZ: -140, maxZ: 155 } };
+  }
+
+  private clearGhostMesh(): void {
+    if (this.ghostMesh) {
+      this.scene?.remove(this.ghostMesh.root);
+      this.ghostMesh.dispose();
+      this.ghostMesh = null;
+    }
   }
 
   private clearActors(): void {
@@ -475,6 +547,7 @@ export class NexoraRaceEngine {
       a.mesh.dispose();
     });
     this.actors = [];
+    this.clearGhostMesh();
   }
 
   private spawnCars(mode: GameMode, difficulty: Difficulty): void {
@@ -516,9 +589,12 @@ export class NexoraRaceEngine {
       });
     }
 
+    const underglowHex =
+      UNDERGLOW_OPTIONS.find((u) => u.id === this.profile.underglowId)?.hex ?? null;
+
     const playerState = createVehicleOnGrid(
       'player',
-      'You (Nexora GT3)',
+      `You (${this.carSpecs.carName})`,
       true,
       livery.bodyHex,
       this.circuit,
@@ -531,6 +607,9 @@ export class NexoraRaceEngine {
       accentColor: livery.accentHex,
       rimColor: livery.rimHex,
       carNumber: '07',
+      carId: this.profile.selectedCarId,
+      wingStyle: this.profile.wingStyle,
+      underglowHex,
       contactShadowTexture: this.textures.contactShadow,
       carbonTexture: this.textures.carbonFiber,
       tireTexture: this.textures.tireTread,
@@ -575,12 +654,16 @@ export class NexoraRaceEngine {
     p.roadPitch = 0;
     p.drifting = h.drifting;
     p.braking = h.braking;
+    p.nitroActive = h.nitroActive;
   }
 
   private spawnHighwayPlayerCar(): void {
     this.clearActors();
     const livery = CAR_LIVERIES.find((l) => l.id === this.settings.liveryId) ?? CAR_LIVERIES[0];
+    const underglowHex =
+      UNDERGLOW_OPTIONS.find((u) => u.id === this.profile.underglowId)?.hex ?? null;
     this.highwayPlayerProxy.color = livery.bodyHex;
+    this.highwayPlayerProxy.name = `You (${this.carSpecs.carName})`;
     this.syncHighwayProxy();
 
     const playerMesh = createSportsCarMesh({
@@ -588,6 +671,9 @@ export class NexoraRaceEngine {
       accentColor: livery.accentHex,
       rimColor: livery.rimHex,
       carNumber: '07',
+      carId: this.profile.selectedCarId,
+      wingStyle: this.profile.wingStyle,
+      underglowHex,
       contactShadowTexture: this.textures.contactShadow,
       carbonTexture: this.textures.carbonFiber,
       tireTexture: this.textures.tireTread,
@@ -652,6 +738,22 @@ export class NexoraRaceEngine {
     }
   }
 
+  private spawnGhostCarMesh(): void {
+    this.clearGhostMesh();
+    this.ghostMesh = createSportsCarMesh({
+      bodyColor: '#38BDF8',
+      accentColor: '#0284C7',
+      rimColor: '#7DD3FC',
+      carId: this.profile.selectedCarId,
+      wingStyle: this.profile.wingStyle,
+      isGhost: true,
+      contactShadowTexture: this.textures.contactShadow,
+      showHeadlightBeams: false,
+    });
+    this.ghostMesh.root.visible = false;
+    this.scene.add(this.ghostMesh.root);
+  }
+
   public startRace(
     mode: GameMode,
     difficulty: Difficulty,
@@ -659,6 +761,9 @@ export class NexoraRaceEngine {
     gameTitle: GameTitle = 'street-racer',
   ): void {
     this.audio.unlock();
+    this.profile = loadPlayerProfile();
+    this.carSpecs = getEffectiveCarSpecs(this.profile);
+
     this.activeGameTitle = gameTitle;
     this.mode = gameTitle === 'drift-king' ? 'time-trial' : mode;
     this.difficulty = difficulty;
@@ -669,6 +774,24 @@ export class NexoraRaceEngine {
     this.activeReplay = null;
     this.lastHighwayResult = null;
     this.lastDriftResult = null;
+
+    // Reset risk-reward, nitro, slipstream & ghost tracking
+    this.nitroAmount = this.carSpecs.nitroCapacity;
+    this.nitroActive = false;
+    this.wasNitroActive = false;
+    this.nitroTriggersInRun = 0;
+    this.slipstreamActive = false;
+    this.wasSlipstreamActive = false;
+    this.slipstreamPassesInRun = 0;
+    this.launchGauge = 0;
+    this.perfectLaunchAchieved = false;
+    this.splitDeltaMs = null;
+    this.splitDeltaSeq = 0;
+    this.splitDeltaTimer = 0;
+    this.activeGhostLap = null;
+    this.currentLapGhostSamples = [];
+    this.currentLapGhostSplits = [];
+    this.lastGhostSampleTimeMs = -999;
 
     // Reset transient effects pools
     this.smokePool.forEach((p) => {
@@ -687,7 +810,7 @@ export class NexoraRaceEngine {
     if (gameTitle === 'highway-rush') {
       this.circuit.group.visible = false;
       this.highwayWorld.group.visible = true;
-      this.highwayWorld.reset(true);
+      this.highwayWorld.reset(true, this.carSpecs.nitroCapacity);
       this.spawnHighwayPlayerCar();
       this.dailyDateKey = '';
       this.dailyTasks = [];
@@ -703,6 +826,10 @@ export class NexoraRaceEngine {
         skidIntensity: 0,
         crashed: false,
         eventBanner: null,
+        nitroRatio: 1,
+        nitroActive: false,
+        oncomingActive: false,
+        nitroTriggeredNow: false,
       };
       this.phase = 'countdown';
       this.countdownRemaining = 3.2;
@@ -748,6 +875,14 @@ export class NexoraRaceEngine {
 
     this.replayRecorder.reset(mode, difficulty, mode === 'free-drive' ? 0 : TOTAL_RACE_LAPS);
     this.spawnCars(mode, difficulty);
+
+    // Load Personal Best Ghost Car for Time Trial & Daily Challenge
+    if (mode === 'time-trial' || mode === 'daily-challenge') {
+      this.activeGhostLap = loadGhostForLayout(this.currentLayoutId);
+      if (this.activeGhostLap) {
+        this.spawnGhostCarMesh();
+      }
+    }
 
     if (mode === 'free-drive') {
       this.phase = 'racing';
@@ -1040,6 +1175,12 @@ export class NexoraRaceEngine {
 
     if (this.phase === 'countdown') {
       this.countdownRemaining -= dt;
+      if (this.input.accelerate) {
+        this.launchGauge = Math.min(1, this.launchGauge + 0.86 * dt);
+      } else {
+        this.launchGauge = Math.max(0, this.launchGauge - 0.72 * dt);
+      }
+
       const currentInt = Math.ceil(this.countdownRemaining);
       if (currentInt < this.lastCountdownInt && currentInt >= 1 && currentInt <= 3) {
         this.lastCountdownInt = currentInt;
@@ -1049,20 +1190,58 @@ export class NexoraRaceEngine {
         this.countdownRemaining = 0;
         this.phase = 'racing';
         this.audio.playCountdownTone(true);
-        this.bannerText =
-          this.activeGameTitle === 'highway-rush'
-            ? 'DODGE TRAFFIC · NEAR MISS FOR COMBOS!'
-            : this.activeGameTitle === 'drift-king'
-              ? 'DRIFT THROUGH ORANGE GATES!'
-              : 'GO!';
-        this.bannerTimer = this.activeGameTitle === 'street-racer' ? 1.2 : 2.1;
+
+        const inPerfectZone = this.launchGauge >= 0.64 && this.launchGauge <= 0.88;
+        const overRevved = this.launchGauge > 0.88;
+
+        if (inPerfectZone) {
+          this.perfectLaunchAchieved = true;
+          this.audio.playPerfectLaunch();
+          if (this.activeGameTitle === 'highway-rush') {
+            this.highwayWorld.playerSpeed = 40;
+            this.syncHighwayProxy();
+          } else {
+            const p = this.actors.find((a) => a.state.isPlayer)?.state;
+            if (p) {
+              const fwdX = Math.sin(p.heading);
+              const fwdZ = Math.cos(p.heading);
+              const launchSpd = 16.5 * this.carSpecs.accelMult;
+              p.speed = launchSpd;
+              p.vx = fwdX * launchSpd;
+              p.vz = fwdZ * launchSpd;
+            }
+          }
+          this.bannerText = 'PERFECT LAUNCH! +100 CR';
+          this.bannerTimer = 2.1;
+        } else if (overRevved) {
+          if (this.activeGameTitle === 'highway-rush') {
+            this.highwayWorld.playerSpeed = 18;
+            this.syncHighwayProxy();
+          }
+          this.bannerText = 'WHEELSPIN — OVER-REVVED!';
+          this.bannerTimer = 1.6;
+        } else {
+          this.bannerText =
+            this.activeGameTitle === 'highway-rush'
+              ? 'DODGE TRAFFIC · ONCOMING LANES = 2x SCORE!'
+              : this.activeGameTitle === 'drift-king'
+                ? 'DRIFT THROUGH ORANGE GATES!'
+                : 'GO!';
+          this.bannerTimer = this.activeGameTitle === 'street-racer' ? 1.2 : 2.1;
+        }
         this.callbacks.onPhaseChange('racing');
       }
       this.emitHud();
       const player = this.actors.find((a) => a.state.isPlayer);
       if (player) {
         this.updateChaseCamera(player.state, dt);
-        this.audio.setDrivingState(true, this.input.accelerate ? 0.55 : 0.14, this.input.accelerate, 0);
+        this.audio.setDrivingState(
+          true,
+          Math.max(0.14, this.launchGauge),
+          this.input.accelerate,
+          0,
+          false,
+        );
       }
       return;
     }
@@ -1085,6 +1264,13 @@ export class NexoraRaceEngine {
       }
     }
 
+    if (this.splitDeltaTimer > 0) {
+      this.splitDeltaTimer -= dt;
+      if (this.splitDeltaTimer <= 0) {
+        this.splitDeltaMs = null;
+      }
+    }
+
     const isDriftMode = this.activeGameTitle === 'drift-king';
     const isLapMode =
       isDriftMode ||
@@ -1092,6 +1278,68 @@ export class NexoraRaceEngine {
       this.mode === 'time-trial' ||
       this.mode === 'daily-challenge';
     const targetLaps = isDriftMode ? 999 : TOTAL_RACE_LAPS;
+
+    // Evaluate Slipstream Drafting & Nitrous Boost before physics step
+    const playerPre = this.actors.find((a) => a.state.isPlayer)?.state;
+    if (this.phase === 'racing' && playerPre) {
+      let drafting = false;
+      if (this.activeGameTitle === 'street-racer' && this.mode === 'circuit' && Math.abs(playerPre.speed) > 16) {
+        const pFwdX = Math.sin(playerPre.heading);
+        const pFwdZ = Math.cos(playerPre.heading);
+        const pRightX = -Math.cos(playerPre.heading);
+        const pRightZ = Math.sin(playerPre.heading);
+        for (let i = 0; i < this.actors.length; i++) {
+          const other = this.actors[i].state;
+          if (other.isPlayer || Math.abs(other.y - playerPre.y) > 2.2) continue;
+          const dx = other.x - playerPre.x;
+          const dz = other.z - playerPre.z;
+          const along = dx * pFwdX + dz * pFwdZ;
+          const lateral = Math.abs(dx * pRightX + dz * pRightZ);
+          if (along > 4.0 && along < 29.0 && lateral < 2.35) {
+            drafting = true;
+            break;
+          }
+        }
+      }
+      this.slipstreamActive = drafting;
+      if (this.slipstreamActive && !this.wasSlipstreamActive) {
+        this.slipstreamPassesInRun += 1;
+      }
+      this.wasSlipstreamActive = this.slipstreamActive;
+
+      const wantNitro = this.input.nitro && !this.input.brake && this.nitroAmount > 2;
+      this.nitroActive = wantNitro;
+      if (this.nitroActive && !this.wasNitroActive) {
+        this.nitroTriggersInRun += 1;
+        this.audio.playNitroBurst();
+      }
+      this.wasNitroActive = this.nitroActive;
+
+      if (this.nitroActive) {
+        this.nitroAmount = Math.max(0, this.nitroAmount - 26 * dt);
+      } else {
+        if (this.slipstreamActive) {
+          this.nitroAmount = Math.min(
+            this.carSpecs.nitroCapacity,
+            this.nitroAmount + 17 * this.carSpecs.nitroRefillMult * dt,
+          );
+        }
+        if (playerPre.drifting && Math.abs(playerPre.speed) > 10) {
+          this.nitroAmount = Math.min(
+            this.carSpecs.nitroCapacity,
+            this.nitroAmount + 15 * this.carSpecs.nitroRefillMult * dt,
+          );
+        }
+      }
+    } else {
+      this.slipstreamActive = false;
+      this.nitroActive = false;
+    }
+
+    const playerControl: InputState = {
+      ...this.input,
+      nitro: this.nitroActive,
+    };
 
     let playerStepResult: {
       wallImpact: number;
@@ -1116,7 +1364,7 @@ export class NexoraRaceEngine {
       const useAi = !actor.state.isPlayer || this.phase === 'finished';
       const ctrl = useAi
         ? computeAiInput(actor.state, this.circuit, this.difficulty)
-        : this.input;
+        : playerControl;
 
       const res = stepVehiclePhysics(
         actor.state,
@@ -1126,6 +1374,8 @@ export class NexoraRaceEngine {
         this.raceElapsedMs,
         targetLaps,
         isLapMode,
+        actor.state.isPlayer && !useAi ? this.carSpecs : undefined,
+        actor.state.isPlayer && !useAi ? this.slipstreamActive : false,
       );
 
       this.syncCarTransform(actor.state, actor.mesh);
@@ -1155,7 +1405,11 @@ export class NexoraRaceEngine {
     const player = this.actors.find((a) => a.state.isPlayer);
     if (player) {
       this.updateChaseCamera(player.state, dt);
-      this.updateSpeedStreaks(this.phase === 'racing' ? player.state.speed : 0, dt);
+      this.updateSpeedStreaks(
+        this.phase === 'racing' ? player.state.speed : 0,
+        dt,
+        this.phase === 'racing' && this.nitroActive,
+      );
       this.updateSunShadowFocus(player.state.x, player.state.y, player.state.z);
 
       const speedKmh = Math.abs(player.state.speed) * 3.6;
@@ -1163,11 +1417,13 @@ export class NexoraRaceEngine {
       this.audio.setDrivingState(
         this.phase === 'racing',
         gearInfo.rpmRatio,
-        this.input.accelerate,
+        this.input.accelerate || this.nitroActive,
         playerStepResult.skidIntensity,
+        this.phase === 'racing' && this.nitroActive,
       );
 
       if (isDriftMode && this.phase === 'racing') {
+        const prevZones = this.lastDriftResult?.zonesHit ?? 0;
         const driftOut = this.driftSession.step(
           player.state,
           totalImpact,
@@ -1175,6 +1431,12 @@ export class NexoraRaceEngine {
           dt,
         );
         this.lastDriftResult = driftOut;
+        if (driftOut.zonesHit > prevZones) {
+          this.nitroAmount = Math.min(
+            this.carSpecs.nitroCapacity,
+            this.nitroAmount + 18 * this.carSpecs.nitroRefillMult,
+          );
+        }
         if (driftOut.bannerText) {
           this.bannerText = driftOut.bannerText;
           this.bannerTimer = 1.65;
@@ -1193,11 +1455,97 @@ export class NexoraRaceEngine {
           const pos = sorted.findIndex((s) => s.isPlayer) + 1;
           this.replayRecorder.recordFrame(
             this.raceElapsedMs,
-            this.input,
+            playerControl,
             this.actors.map((a) => a.state),
             player.state.lap,
             pos,
           );
+
+          // Live Ghost Lap Recording, Playback & Sector Splits (Time Trial & Daily Challenge)
+          if (this.mode === 'time-trial' || this.mode === 'daily-challenge') {
+            if (playerStepResult.completedLap && playerStepResult.lastLapDurationMs !== null) {
+              const lapDur = playerStepResult.lastLapDurationMs;
+              this.currentLapGhostSamples.push({
+                t: lapDur,
+                x: Number(player.state.x.toFixed(2)),
+                y: Number(player.state.y.toFixed(2)),
+                z: Number(player.state.z.toFixed(2)),
+                h: Number(player.state.heading.toFixed(3)),
+                s: Number(player.state.steerVisual.toFixed(2)),
+                w: Number(player.state.wheelSpinAngle.toFixed(2)),
+              });
+
+              if (this.activeGhostLap) {
+                const lapDelta = lapDur - this.activeGhostLap.lapTimeMs;
+                this.splitDeltaMs = lapDelta;
+                this.splitDeltaSeq += 1;
+                this.splitDeltaTimer = 2.6;
+                this.audio.playSplitDelta(lapDelta <= 0);
+              }
+
+              const completedGhost: LapGhostData = {
+                layoutId: this.currentLayoutId,
+                lapTimeMs: lapDur,
+                checkpointSplitsMs: [...this.currentLapGhostSplits],
+                samples: [...this.currentLapGhostSamples],
+              };
+              if (saveBestGhostForLayout(completedGhost)) {
+                this.activeGhostLap = completedGhost;
+                if (!this.ghostMesh) {
+                  this.spawnGhostCarMesh();
+                }
+              }
+
+              this.currentLapGhostSamples = [];
+              this.currentLapGhostSplits = [];
+              this.lastGhostSampleTimeMs = -999;
+            }
+
+            const lapElapsedMs = Math.max(0, this.raceElapsedMs - player.state.lapStartTimeMs);
+            if (playerStepResult.crossedCheckpointIndex !== null) {
+              const cpIdx = playerStepResult.crossedCheckpointIndex;
+              this.currentLapGhostSplits[cpIdx] = lapElapsedMs;
+              if (this.activeGhostLap) {
+                const ghostSplit = this.activeGhostLap.checkpointSplitsMs[cpIdx];
+                if (typeof ghostSplit === 'number' && ghostSplit > 0) {
+                  const cpDelta = lapElapsedMs - ghostSplit;
+                  this.splitDeltaMs = cpDelta;
+                  this.splitDeltaSeq += 1;
+                  this.splitDeltaTimer = 2.6;
+                  this.audio.playSplitDelta(cpDelta <= 0);
+                }
+              }
+            }
+
+            if (lapElapsedMs - this.lastGhostSampleTimeMs >= 95) {
+              this.currentLapGhostSamples.push({
+                t: Math.round(lapElapsedMs),
+                x: Number(player.state.x.toFixed(2)),
+                y: Number(player.state.y.toFixed(2)),
+                z: Number(player.state.z.toFixed(2)),
+                h: Number(player.state.heading.toFixed(3)),
+                s: Number(player.state.steerVisual.toFixed(2)),
+                w: Number(player.state.wheelSpinAngle.toFixed(2)),
+              });
+              this.lastGhostSampleTimeMs = lapElapsedMs;
+            }
+
+            if (this.activeGhostLap && this.ghostMesh) {
+              const ghostPose = sampleGhostAtTime(this.activeGhostLap, lapElapsedMs);
+              if (ghostPose) {
+                this.ghostMesh.root.visible = true;
+                this.ghostMesh.root.position.set(ghostPose.x, ghostPose.y, ghostPose.z);
+                this.ghostMesh.root.rotation.set(0, ghostPose.heading, 0);
+                this.ghostMesh.frontLeftSteer.rotation.y = ghostPose.steerVisual;
+                this.ghostMesh.frontRightSteer.rotation.y = ghostPose.steerVisual;
+                this.ghostMesh.wheelSpins.forEach((w) => {
+                  w.rotation.x = ghostPose.wheelSpinAngle;
+                });
+              } else {
+                this.ghostMesh.root.visible = false;
+              }
+            }
+          }
         }
 
         if (this.mode === 'daily-challenge' && this.phase === 'racing') {
@@ -1244,9 +1592,14 @@ export class NexoraRaceEngine {
     }
 
     if (this.phase === 'racing') {
-      const hRes = this.highwayWorld.step(this.input, dt, true);
+      const hRes = this.highwayWorld.step(this.input, dt, true, this.carSpecs);
       this.lastHighwayResult = hRes;
       this.syncHighwayProxy();
+
+      if (hRes.nitroTriggeredNow) {
+        this.nitroTriggersInRun += 1;
+        this.audio.playNitroBurst();
+      }
 
       const hero = this.actors[0];
       if (hero) {
@@ -1273,10 +1626,15 @@ export class NexoraRaceEngine {
       }
     }
 
+    const nitroNow = this.phase === 'racing' && (this.lastHighwayResult?.nitroActive ?? false);
     this.updateSmokeParticles(dt);
     this.updateSparkParticles(dt);
     this.updateChaseCamera(this.highwayPlayerProxy, dt);
-    this.updateSpeedStreaks(this.phase === 'racing' ? this.highwayPlayerProxy.speed : 0, dt);
+    this.updateSpeedStreaks(
+      this.phase === 'racing' ? this.highwayPlayerProxy.speed : 0,
+      dt,
+      nitroNow,
+    );
     this.updateSunShadowFocus(this.highwayPlayerProxy.x, 0, this.highwayPlayerProxy.z);
 
     const speedKmh = Math.abs(this.highwayPlayerProxy.speed) * 3.6;
@@ -1284,8 +1642,9 @@ export class NexoraRaceEngine {
     this.audio.setDrivingState(
       this.phase === 'racing',
       gearInfo.rpmRatio,
-      this.input.accelerate,
+      this.input.accelerate || nitroNow,
       this.lastHighwayResult?.skidIntensity ?? 0,
+      nitroNow,
     );
 
     this.hudEmitAccum += dt;
@@ -1302,6 +1661,26 @@ export class NexoraRaceEngine {
     this.audio.setDrivingState(false, 0, false, 0);
 
     const saved = recordHighwayRushRun(res.score, res.distanceKm);
+    const { profile, earnings } = awardRunProgression({
+      gameTitle: 'highway-rush',
+      mode: 'time-trial',
+      difficulty: this.difficulty,
+      position: 1,
+      isNewBestRace: false,
+      isNewBestLap: false,
+      isNewBestScore: saved.isNewBestScore,
+      score: res.score,
+      distanceKm: res.distanceKm,
+      nearMissCount: res.nearMissCount,
+      perfectLaunch: this.perfectLaunchAchieved,
+      nitroActivationsInRun: this.nitroTriggersInRun,
+      slipstreamPassesInRun: 0,
+      dailyTasksClearedInRun: 0,
+      allDailyTasksCleared: false,
+    });
+    this.profile = profile;
+    this.carSpecs = getEffectiveCarSpecs(profile);
+
     const result: RaceResult = {
       gameTitle: 'highway-rush',
       mode: 'time-trial',
@@ -1317,6 +1696,7 @@ export class NexoraRaceEngine {
       totalRacers: 1,
       standings: [],
       hasReplay: false,
+      earnings,
       score: res.score,
       previousBestScore: saved.previousBestScore,
       isNewBestScore: saved.isNewBestScore,
@@ -1337,6 +1717,27 @@ export class NexoraRaceEngine {
     this.audio.setDrivingState(false, 0, false, 0);
 
     const saved = recordDriftKingRun(driftOut.totalScore, driftOut.maxMultiplier);
+    const distKm = (this.raceElapsedMs / 1000) * 0.025;
+    const { profile, earnings } = awardRunProgression({
+      gameTitle: 'drift-king',
+      mode: 'time-trial',
+      difficulty: this.difficulty,
+      position: 1,
+      isNewBestRace: false,
+      isNewBestLap: false,
+      isNewBestScore: saved.isNewBestScore,
+      score: driftOut.totalScore,
+      distanceKm: distKm,
+      nearMissCount: 0,
+      perfectLaunch: this.perfectLaunchAchieved,
+      nitroActivationsInRun: this.nitroTriggersInRun,
+      slipstreamPassesInRun: 0,
+      dailyTasksClearedInRun: 0,
+      allDailyTasksCleared: false,
+    });
+    this.profile = profile;
+    this.carSpecs = getEffectiveCarSpecs(profile);
+
     const result: RaceResult = {
       gameTitle: 'drift-king',
       mode: 'time-trial',
@@ -1352,6 +1753,7 @@ export class NexoraRaceEngine {
       totalRacers: 1,
       standings: [],
       hasReplay: false,
+      earnings,
       score: driftOut.totalScore,
       previousBestScore: saved.previousBestScore,
       isNewBestScore: saved.isNewBestScore,
@@ -1485,6 +1887,27 @@ export class NexoraRaceEngine {
         ? this.evaluateDailyProgress(player, null, null, true)
         : undefined;
 
+    const raceDistKm = (this.circuit.totalLength * TOTAL_RACE_LAPS) / 1000;
+    const { profile, earnings } = awardRunProgression({
+      gameTitle: 'street-racer',
+      mode: this.mode,
+      difficulty: this.difficulty,
+      position: playerPosition,
+      isNewBestRace: saved.isNewBestRace,
+      isNewBestLap: saved.isNewBestLap,
+      isNewBestScore: false,
+      score: 0,
+      distanceKm: raceDistKm,
+      nearMissCount: 0,
+      perfectLaunch: this.perfectLaunchAchieved,
+      nitroActivationsInRun: this.nitroTriggersInRun,
+      slipstreamPassesInRun: this.slipstreamPassesInRun,
+      dailyTasksClearedInRun: dailySummary?.newlyCompletedIds.length ?? 0,
+      allDailyTasksCleared: dailySummary ? dailySummary.tasks.every((t) => t.completed) : false,
+    });
+    this.profile = profile;
+    this.carSpecs = getEffectiveCarSpecs(profile);
+
     const result: RaceResult = {
       gameTitle: 'street-racer',
       mode: this.mode,
@@ -1501,6 +1924,7 @@ export class NexoraRaceEngine {
       standings,
       hasReplay: this.activeReplay !== null,
       dailySummary,
+      earnings,
     };
 
     this.callbacks.onPhaseChange('finished');
@@ -1541,17 +1965,30 @@ export class NexoraRaceEngine {
     mesh.brakeLightMat.emissiveIntensity = v.braking ? 3.5 : 0.9;
     mesh.brakeHaloMat.opacity = v.braking ? 0.78 : 0.22;
 
-    // Subtle exhaust pulse flare during active high-speed acceleration
+    // Exhaust pulse flare (blue-cyan afterburner during Nitrous, warm amber otherwise)
     const fxActive =
       this.phase === 'racing' ||
       this.phase === 'finished' ||
       (this.phase === 'replay' && this.replayPlaying);
-    const showFlame = fxActive && v.speed > 18 && !v.braking && Math.random() < 0.28;
-    mesh.exhaustFlameMat.opacity = showFlame ? 0.65 : 0;
+    const nitroFlame = fxActive && v.nitroActive && !v.braking;
+    const showFlame = nitroFlame || (fxActive && v.speed > 18 && !v.braking && Math.random() < 0.28);
+
+    if (nitroFlame) {
+      mesh.exhaustFlameMat.color.setHex(0x38bdf8);
+      mesh.exhaustFlameMat.opacity = 0.88;
+    } else {
+      mesh.exhaustFlameMat.color.setHex(0xff7a18);
+      mesh.exhaustFlameMat.opacity = showFlame ? 0.65 : 0;
+    }
+
     mesh.exhaustFlames.forEach((f) => {
       f.visible = showFlame;
       if (showFlame) {
-        f.scale.z = 0.7 + Math.random() * 0.65;
+        if (nitroFlame) {
+          f.scale.set(1.22, 1.22, 1.45 + Math.random() * 0.65);
+        } else {
+          f.scale.set(1, 1, 0.7 + Math.random() * 0.65);
+        }
       }
     });
   }
@@ -1598,8 +2035,9 @@ export class NexoraRaceEngine {
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camTarget);
 
-    // Speed-sensitive FOV widening
-    const targetFov = (isPortrait ? 66 : 58) + speedRatio * 15;
+    // Speed-sensitive FOV widening + Nitrous rush surge
+    const nitroFovBoost = this.phase === 'racing' && player.nitroActive ? 7.5 : 0;
+    const targetFov = (isPortrait ? 66 : 58) + speedRatio * 15 + nitroFovBoost;
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 7, dt);
       this.camera.updateProjectionMatrix();
@@ -1713,9 +2151,11 @@ export class NexoraRaceEngine {
     }
   }
 
-  private updateSpeedStreaks(speedMs: number, dt: number): void {
+  private updateSpeedStreaks(speedMs: number, dt: number, nitroActive = false): void {
     const kmh = Math.abs(speedMs) * 3.6;
-    const targetOpacity = kmh > 125 ? Math.min(0.45, ((kmh - 125) / 120) * 0.45) : 0;
+    const baseOpacity = kmh > 125 ? Math.min(0.45, ((kmh - 125) / 120) * 0.45) : 0;
+    const targetOpacity = nitroActive ? Math.min(0.6, Math.max(0.28, baseOpacity + 0.16)) : baseOpacity;
+    this.streakMat.color.setHex(nitroActive ? 0x38bdf8 : 0xe2e8f0);
     this.streakMat.opacity += (targetOpacity - this.streakMat.opacity) * Math.min(1, dt * 8);
 
     if (this.streakMat.opacity < 0.01) {
@@ -1724,7 +2164,7 @@ export class NexoraRaceEngine {
     }
 
     this.speedStreaksGroup.visible = true;
-    const speedFactor = 0.8 + Math.min(1.8, kmh / 140);
+    const speedFactor = 0.8 + Math.min(2.2, kmh / 135) + (nitroActive ? 0.55 : 0);
     for (let i = 0; i < this.speedStreaks.length; i++) {
       const st = this.speedStreaks[i];
       st.z += st.speed * speedFactor * dt;
@@ -1769,6 +2209,12 @@ export class NexoraRaceEngine {
         comboTimerRatio: hr?.comboTimerRatio ?? 0,
         nearMissCount: hr?.nearMissCount ?? 0,
         distanceKm: hr?.distanceKm ?? 0,
+        nitroRatio: hr?.nitroRatio ?? 1,
+        nitroActive: hr?.nitroActive ?? false,
+        slipstreamActive: false,
+        oncomingActive: hr?.oncomingActive ?? false,
+        launchGauge: this.phase === 'countdown' ? this.launchGauge : undefined,
+        launchZone: [0.64, 0.88],
       });
       return;
     }
@@ -1778,6 +2224,10 @@ export class NexoraRaceEngine {
       .sort((a, b) => b.totalProgress - a.totalProgress);
     const position = sorted.findIndex((s) => s.isPlayer) + 1;
     const dr = this.activeGameTitle === 'drift-king' ? this.lastDriftResult : null;
+    const nitroRatio =
+      this.carSpecs.nitroCapacity > 0
+        ? Math.max(0, Math.min(1, this.nitroAmount / this.carSpecs.nitroCapacity))
+        : 0;
 
     this.callbacks.onTelemetry({
       gameTitle: this.activeGameTitle,
@@ -1822,6 +2272,17 @@ export class NexoraRaceEngine {
       comboTimerRatio: dr?.comboTimerRatio,
       timeRemainingMs: dr?.timeRemainingMs,
       driftZonesHit: dr?.zonesHit,
+      nitroRatio,
+      nitroActive: this.nitroActive,
+      slipstreamActive: this.slipstreamActive,
+      oncomingActive: false,
+      launchGauge: this.phase === 'countdown' ? this.launchGauge : undefined,
+      launchZone: [0.64, 0.88],
+      splitDeltaMs: this.splitDeltaMs,
+      splitDeltaSeq: this.splitDeltaSeq,
+      ghostActive: Boolean(
+        this.activeGhostLap && (this.mode === 'time-trial' || this.mode === 'daily-challenge'),
+      ),
     });
   }
 
@@ -1855,8 +2316,9 @@ export class NexoraRaceEngine {
       this.audio.setDrivingState(
         this.replayPlaying,
         gearInfo.rpmRatio,
-        sampled.playerInput.accelerate,
+        sampled.playerInput.accelerate || sampled.playerInput.nitro,
         skid,
+        Boolean(this.replayPlaying && sampled.playerInput.nitro),
       );
       this.updateSunShadowFocus(playerSnap.x, playerSnap.y, playerSnap.z);
     }
@@ -1891,6 +2353,7 @@ export class NexoraRaceEngine {
       actor.state.roadPitch = snap.roadPitch;
       actor.state.braking = snap.braking;
       actor.state.drifting = snap.drifting;
+      actor.state.nitroActive = Boolean(snap.id === 'player' && sampled.playerInput.nitro);
 
       this.syncCarTransform(actor.state, actor.mesh);
 
@@ -2042,6 +2505,7 @@ export class NexoraRaceEngine {
     }
 
     this.clearActors();
+    this.clearGhostMesh();
     this.circuit?.dispose();
     this.highwayWorld?.dispose();
     this.textures?.dispose();

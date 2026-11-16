@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { CarId, WingStyleId } from './types';
 
 export interface SportsCarMeshHandles {
   root: THREE.Group;
@@ -12,6 +13,7 @@ export interface SportsCarMeshHandles {
   exhaustFlameMat: THREE.MeshBasicMaterial;
   exhaustFlames: THREE.Mesh[];
   paintMat: THREE.MeshPhysicalMaterial;
+  underglowMat: THREE.MeshBasicMaterial | null;
   dispose: () => void;
 }
 
@@ -20,6 +22,10 @@ export interface CarMeshOptions {
   accentColor: string;
   rimColor: string;
   carNumber?: string;
+  carId?: CarId;
+  wingStyle?: WingStyleId;
+  underglowHex?: string | null;
+  isGhost?: boolean;
   contactShadowTexture: THREE.Texture;
   carbonTexture?: THREE.Texture;
   tireTexture?: THREE.Texture;
@@ -277,99 +283,152 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     return t;
   };
 
+  const isGhost = Boolean(options.isGhost);
+  const carId: CarId = options.carId ?? 'gt3-r';
+  const wingStyle: WingStyleId = options.wingStyle ?? (carId === 'spectre-v10' ? 'drag' : carId === 'phantom-apex' ? 'twin-track' : 'gt3');
+
   // Calibrated Automotive & Motorsport PBR Materials
   const paintMat = trackMat(
-    new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(options.bodyColor),
-      metalness: 0.74,
-      roughness: 0.17,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.04,
-      reflectivity: 0.96,
-    }),
+    new THREE.MeshPhysicalMaterial(
+      isGhost
+        ? {
+            color: 0x38bdf8,
+            emissive: 0x0ea5e9,
+            emissiveIntensity: 1.3,
+            metalness: 0.1,
+            roughness: 0.2,
+            transparent: true,
+            opacity: 0.34,
+            depthWrite: false,
+          }
+        : {
+            color: new THREE.Color(options.bodyColor),
+            metalness: 0.74,
+            roughness: 0.17,
+            clearcoat: 1.0,
+            clearcoatRoughness: 0.04,
+            reflectivity: 0.96,
+          },
+    ),
   );
 
   const stripeMat = trackMat(
-    new THREE.MeshPhysicalMaterial({
-      color: 0xf8fafc,
-      metalness: 0.2,
-      roughness: 0.22,
-      clearcoat: 0.85,
-      clearcoatRoughness: 0.08,
-    }),
+    new THREE.MeshPhysicalMaterial(
+      isGhost
+        ? { color: 0x7dd3fc, emissive: 0x38bdf8, transparent: true, opacity: 0.3, depthWrite: false }
+        : {
+            color: 0xf8fafc,
+            metalness: 0.2,
+            roughness: 0.22,
+            clearcoat: 0.85,
+            clearcoatRoughness: 0.08,
+          },
+    ),
   );
 
   const accentTrimMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xf97316,
-      metalness: 0.35,
-      roughness: 0.28,
-    }),
+    new THREE.MeshStandardMaterial(
+      isGhost
+        ? { color: 0x38bdf8, emissive: 0x0ea5e9, transparent: true, opacity: 0.35, depthWrite: false }
+        : {
+            color: 0xf97316,
+            metalness: 0.35,
+            roughness: 0.28,
+          },
+    ),
   );
 
   const carbonMat = trackMat(
-    new THREE.MeshPhysicalMaterial({
-      color: new THREE.Color(options.accentColor).lerp(new THREE.Color('#141820'), 0.55),
-      map: options.carbonTexture ?? null,
-      metalness: 0.28,
-      roughness: 0.36,
-      clearcoat: 0.65,
-      clearcoatRoughness: 0.18,
-    }),
+    new THREE.MeshPhysicalMaterial(
+      isGhost
+        ? { color: 0x0284c7, emissive: 0x0369a1, transparent: true, opacity: 0.24, depthWrite: false }
+        : {
+            color: new THREE.Color(options.accentColor).lerp(new THREE.Color('#141820'), 0.55),
+            map: options.carbonTexture ?? null,
+            metalness: 0.28,
+            roughness: 0.36,
+            clearcoat: 0.65,
+            clearcoatRoughness: 0.18,
+          },
+    ),
   );
 
   const darkTrimMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x090b10,
-      metalness: 0.2,
-      roughness: 0.78,
-    }),
+    new THREE.MeshStandardMaterial(
+      isGhost
+        ? { color: 0x0369a1, transparent: true, opacity: 0.18, depthWrite: false }
+        : {
+            color: 0x090b10,
+            metalness: 0.2,
+            roughness: 0.78,
+          },
+    ),
   );
 
   const grilleMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x1e2532,
-      map: options.grilleTexture ?? null,
-      metalness: 0.4,
-      roughness: 0.65,
-    }),
+    new THREE.MeshStandardMaterial(
+      isGhost
+        ? { color: 0x0284c7, transparent: true, opacity: 0.2, depthWrite: false }
+        : {
+            color: 0x1e2532,
+            map: options.grilleTexture ?? null,
+            metalness: 0.4,
+            roughness: 0.65,
+          },
+    ),
   );
 
   const alloyMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xdbeafe,
-      metalness: 0.92,
-      roughness: 0.2,
-    }),
+    new THREE.MeshStandardMaterial(
+      isGhost
+        ? { color: 0x7dd3fc, transparent: true, opacity: 0.28, depthWrite: false }
+        : {
+            color: 0xdbeafe,
+            metalness: 0.92,
+            roughness: 0.2,
+          },
+    ),
   );
 
   const glassMat = trackMat(
-    new THREE.MeshPhysicalMaterial({
-      color: 0x050a14,
-      metalness: 0.12,
-      roughness: 0.04,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.02,
-      opacity: 0.78,
-      transparent: true,
-    }),
+    new THREE.MeshPhysicalMaterial(
+      isGhost
+        ? { color: 0x7dd3fc, emissive: 0x38bdf8, transparent: true, opacity: 0.25, depthWrite: false }
+        : {
+            color: 0x050a14,
+            metalness: 0.12,
+            roughness: 0.04,
+            clearcoat: 1.0,
+            clearcoatRoughness: 0.02,
+            opacity: 0.78,
+            transparent: true,
+          },
+    ),
   );
 
   const tireMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: options.tireTexture ? 0xffffff : 0x15181f,
-      map: options.tireTexture ?? null,
-      metalness: 0.05,
-      roughness: 0.88,
-    }),
+    new THREE.MeshStandardMaterial(
+      isGhost
+        ? { color: 0x0ea5e9, transparent: true, opacity: 0.26, depthWrite: false }
+        : {
+            color: options.tireTexture ? 0xffffff : 0x15181f,
+            map: options.tireTexture ?? null,
+            metalness: 0.05,
+            roughness: 0.88,
+          },
+    ),
   );
 
   const rimMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: new THREE.Color(options.rimColor),
-      metalness: 0.94,
-      roughness: 0.15,
-    }),
+    new THREE.MeshStandardMaterial(
+      isGhost
+        ? { color: 0x7dd3fc, transparent: true, opacity: 0.35, depthWrite: false }
+        : {
+            color: new THREE.Color(options.rimColor),
+            metalness: 0.94,
+            roughness: 0.15,
+          },
+    ),
   );
 
   const centerLockMat = trackMat(
@@ -467,8 +526,8 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
 
   const bodyGeo = trackGeo(createLoftedGtBody(bodyStations));
   const bodyMesh = new THREE.Mesh(bodyGeo, paintMat);
-  bodyMesh.castShadow = true;
-  bodyMesh.receiveShadow = true;
+  bodyMesh.castShadow = !isGhost;
+  bodyMesh.receiveShadow = !isGhost;
   chassis.add(bodyMesh);
 
   // 2. Flared Widebody Wheel Arches + Recessed Dark Arch Tubs
@@ -496,74 +555,76 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     const flare = new THREE.Mesh(flareGeo, paintMat);
     flare.position.set(cfg.x, 0.36, cfg.z);
     flare.scale.set(cfg.scaleX, 1, 1);
-    flare.castShadow = true;
-    flare.receiveShadow = true;
+    flare.castShadow = !isGhost;
+    flare.receiveShadow = !isGhost;
     chassis.add(flare);
   });
 
-  // 3. Racing Livery Stripes & Number Plates (unaffected by paint recolor)
-  const hoodStripeGeo = trackGeo(new THREE.BoxGeometry(0.13, 0.015, 1.12));
-  [-0.12, 0.12].forEach((xPos) => {
-    const hStripe = new THREE.Mesh(hoodStripeGeo, stripeMat);
-    hStripe.position.set(xPos, 0.635, 1.56);
-    hStripe.rotation.x = 0.195;
-    chassis.add(hStripe);
-  });
+  // 3. Racing Livery Stripes & Number Plates (skipped in hologram ghost mode)
+  if (!isGhost) {
+    const hoodStripeGeo = trackGeo(new THREE.BoxGeometry(0.13, 0.015, 1.12));
+    [-0.12, 0.12].forEach((xPos) => {
+      const hStripe = new THREE.Mesh(hoodStripeGeo, stripeMat);
+      hStripe.position.set(xPos, 0.635, 1.56);
+      hStripe.rotation.x = 0.195;
+      chassis.add(hStripe);
+    });
 
-  const deckStripeGeo = trackGeo(new THREE.BoxGeometry(0.13, 0.015, 0.72));
-  [-0.12, 0.12].forEach((xPos) => {
-    const dStripe = new THREE.Mesh(deckStripeGeo, stripeMat);
-    dStripe.position.set(xPos, 0.868, -1.86);
-    dStripe.rotation.x = -0.07;
-    chassis.add(dStripe);
-  });
+    const deckStripeGeo = trackGeo(new THREE.BoxGeometry(0.13, 0.015, 0.72));
+    [-0.12, 0.12].forEach((xPos) => {
+      const dStripe = new THREE.Mesh(deckStripeGeo, stripeMat);
+      dStripe.position.set(xPos, 0.868, -1.86);
+      dStripe.rotation.x = -0.07;
+      chassis.add(dStripe);
+    });
 
-  // Door & Hood Racing Number Plates
-  const carNumber = options.carNumber ?? '07';
-  const numTex = trackTex(createRaceNumberTexture(carNumber, options.accentColor));
-  const numPlateMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      map: numTex,
-      roughness: 0.35,
-      metalness: 0.08,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    }),
-  );
-  const doorPlateGeo = trackGeo(new THREE.PlaneGeometry(0.58, 0.40));
-  [-1, 1].forEach((side) => {
-    const plate = new THREE.Mesh(doorPlateGeo, numPlateMat);
-    plate.position.set(side * 0.945, 0.54, -0.08);
-    plate.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
-    chassis.add(plate);
-  });
+    const carNumber = options.carNumber ?? '07';
+    const numTex = trackTex(createRaceNumberTexture(carNumber, options.accentColor));
+    const numPlateMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        map: numTex,
+        roughness: 0.35,
+        metalness: 0.08,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      }),
+    );
+    const doorPlateGeo = trackGeo(new THREE.PlaneGeometry(0.58, 0.40));
+    [-1, 1].forEach((side) => {
+      const plate = new THREE.Mesh(doorPlateGeo, numPlateMat);
+      plate.position.set(side * 0.945, 0.54, -0.08);
+      plate.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+      chassis.add(plate);
+    });
 
-  const hoodPlateGeo = trackGeo(new THREE.PlaneGeometry(0.48, 0.36));
-  hoodPlateGeo.rotateX(-Math.PI / 2);
-  const hoodPlate = new THREE.Mesh(hoodPlateGeo, numPlateMat);
-  hoodPlate.position.set(0, 0.605, 1.84);
-  hoodPlate.rotation.x = 0.22;
-  chassis.add(hoodPlate);
+    const hoodPlateGeo = trackGeo(new THREE.PlaneGeometry(0.48, 0.36));
+    hoodPlateGeo.rotateX(-Math.PI / 2);
+    const hoodPlate = new THREE.Mesh(hoodPlateGeo, numPlateMat);
+    hoodPlate.position.set(0, 0.605, 1.84);
+    hoodPlate.rotation.x = 0.22;
+    chassis.add(hoodPlate);
+  }
 
   // 4. Aerodynamic Wraparound Race Canopy + Cockpit Roll Cage + Racing Seats + Roof Scoop
   const canopyGeo = trackGeo(createLoftedCanopy());
   const canopyMesh = new THREE.Mesh(canopyGeo, glassMat);
-  canopyMesh.castShadow = true;
+  canopyMesh.castShadow = !isGhost;
   chassis.add(canopyMesh);
 
-  // Windshield Motorsport Sun-Strip Banner
-  const bannerTex = trackTex(createWindshieldBannerTexture());
-  const bannerMat = trackMat(
-    new THREE.MeshBasicMaterial({
-      map: bannerTex,
-    }),
-  );
-  const sunStripGeo = trackGeo(new THREE.PlaneGeometry(0.88, 0.12));
-  const sunStrip = new THREE.Mesh(sunStripGeo, bannerMat);
-  sunStrip.position.set(0, 1.115, 0.42);
-  sunStrip.rotation.x = -0.98;
-  chassis.add(sunStrip);
+  if (!isGhost) {
+    const bannerTex = trackTex(createWindshieldBannerTexture());
+    const bannerMat = trackMat(
+      new THREE.MeshBasicMaterial({
+        map: bannerTex,
+      }),
+    );
+    const sunStripGeo = trackGeo(new THREE.PlaneGeometry(0.88, 0.12));
+    const sunStrip = new THREE.Mesh(sunStripGeo, bannerMat);
+    sunStrip.position.set(0, 1.115, 0.42);
+    sunStrip.rotation.x = -0.98;
+    chassis.add(sunStrip);
+  }
 
   // Visible Interior: Racing Bucket Seats, Roll Cage Hoop, Steering Wheel & Digital Dash
   const seatBackGeo = trackGeo(new THREE.BoxGeometry(0.32, 0.38, 0.11));
@@ -635,19 +696,35 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
   scoopMesh.position.set(0, 1.22, -0.10);
   chassis.add(scoopMesh);
 
-  const sharkFinShape = new THREE.Shape();
-  sharkFinShape.moveTo(-1.02, 0);
-  sharkFinShape.lineTo(0, 0.18);
-  sharkFinShape.lineTo(0, 0);
-  sharkFinShape.closePath();
-  const sharkFinGeo = trackGeo(
-    new THREE.ExtrudeGeometry(sharkFinShape, { depth: 0.025, bevelEnabled: false }),
-  );
-  sharkFinGeo.translate(0, 0, -0.0125);
-  sharkFinGeo.rotateY(-Math.PI / 2);
-  const sharkFin = new THREE.Mesh(sharkFinGeo, carbonMat);
-  sharkFin.position.set(0, 0.90, -0.78);
-  chassis.add(sharkFin);
+  if (carId === 'phantom-apex' || carId === 'spectre-v10') {
+    const sharkFinShape = new THREE.Shape();
+    sharkFinShape.moveTo(-1.12, 0);
+    sharkFinShape.lineTo(0, carId === 'phantom-apex' ? 0.28 : 0.2);
+    sharkFinShape.lineTo(0, 0);
+    sharkFinShape.closePath();
+    const sharkFinGeo = trackGeo(
+      new THREE.ExtrudeGeometry(sharkFinShape, { depth: 0.03, bevelEnabled: false }),
+    );
+    sharkFinGeo.translate(0, 0, -0.015);
+    sharkFinGeo.rotateY(-Math.PI / 2);
+    const sharkFin = new THREE.Mesh(sharkFinGeo, carbonMat);
+    sharkFin.position.set(0, 0.9, -0.74);
+    chassis.add(sharkFin);
+  } else {
+    const sharkFinShape = new THREE.Shape();
+    sharkFinShape.moveTo(-0.85, 0);
+    sharkFinShape.lineTo(0, 0.14);
+    sharkFinShape.lineTo(0, 0);
+    sharkFinShape.closePath();
+    const sharkFinGeo = trackGeo(
+      new THREE.ExtrudeGeometry(sharkFinShape, { depth: 0.024, bevelEnabled: false }),
+    );
+    sharkFinGeo.translate(0, 0, -0.012);
+    sharkFinGeo.rotateY(-Math.PI / 2);
+    const sharkFin = new THREE.Mesh(sharkFinGeo, carbonMat);
+    sharkFin.position.set(0, 0.9, -0.82);
+    chassis.add(sharkFin);
+  }
 
   // 5. Aerodynamic Twin-Stalk GT Wing Mirrors
   const mirrorStalkGeo = trackGeo(new THREE.BoxGeometry(0.20, 0.03, 0.045));
@@ -763,76 +840,87 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     chassis.add(blade);
   });
 
-  // 7. Cambered Dual-Plane Swan-Neck Carbon GT3 Rear Wing
-  const wingShape = new THREE.Shape();
-  wingShape.moveTo(0.18, 0.01);
-  wingShape.quadraticCurveTo(0.02, 0.038, -0.18, 0.045);
-  wingShape.lineTo(-0.18, 0.02);
-  wingShape.quadraticCurveTo(0.02, 0.006, 0.18, -0.012);
-  wingShape.closePath();
+  // 7. Rear Aero Wing (Low-Drag Blade, Swan-Neck GT3, or Twin-Plane Pro)
+  if (wingStyle === 'drag') {
+    const bladeGeo = trackGeo(new THREE.BoxGeometry(1.78, 0.09, 0.24));
+    const blade = new THREE.Mesh(bladeGeo, carbonMat);
+    blade.position.set(0, 0.95, -2.21);
+    blade.rotation.x = 0.28;
+    blade.castShadow = !isGhost;
+    chassis.add(blade);
+  } else {
+    const wingShape = new THREE.Shape();
+    wingShape.moveTo(0.18, 0.01);
+    wingShape.quadraticCurveTo(0.02, 0.038, -0.18, 0.045);
+    wingShape.lineTo(-0.18, 0.02);
+    wingShape.quadraticCurveTo(0.02, 0.006, 0.18, -0.012);
+    wingShape.closePath();
 
-  const mainWingGeo = trackGeo(
-    new THREE.ExtrudeGeometry(wingShape, { depth: 1.92, bevelEnabled: false }),
-  );
-  mainWingGeo.translate(0, 0, -0.96);
-  mainWingGeo.rotateY(-Math.PI / 2);
-  const mainWing = new THREE.Mesh(mainWingGeo, carbonMat);
-  mainWing.position.set(0, 1.18, -2.08);
-  mainWing.castShadow = true;
-  chassis.add(mainWing);
+    const span = wingStyle === 'twin-track' ? 2.02 : 1.92;
+    const mainWingGeo = trackGeo(
+      new THREE.ExtrudeGeometry(wingShape, { depth: span, bevelEnabled: false }),
+    );
+    mainWingGeo.translate(0, 0, -span * 0.5);
+    mainWingGeo.rotateY(-Math.PI / 2);
+    const mainWing = new THREE.Mesh(mainWingGeo, carbonMat);
+    mainWing.position.set(0, 1.18, -2.08);
+    mainWing.castShadow = !isGhost;
+    chassis.add(mainWing);
 
-  // Upper Gurney Flap Element
-  const flapGeo = trackGeo(new THREE.BoxGeometry(1.90, 0.035, 0.12));
-  const flap = new THREE.Mesh(flapGeo, carbonMat);
-  flap.position.set(0, 1.255, -2.20);
-  flap.rotation.x = 0.38;
-  chassis.add(flap);
+    // Upper Gurney Flap or Full Twin-Plane Second Element
+    const flapGeo = trackGeo(
+      new THREE.BoxGeometry(span - 0.02, wingStyle === 'twin-track' ? 0.045 : 0.035, wingStyle === 'twin-track' ? 0.19 : 0.12),
+    );
+    const flap = new THREE.Mesh(flapGeo, carbonMat);
+    flap.position.set(0, wingStyle === 'twin-track' ? 1.32 : 1.255, -2.18);
+    flap.rotation.x = 0.36;
+    chassis.add(flap);
 
-  // Swan-Neck Wing Pylons (arching over top of wing!)
-  const pylonShape = new THREE.Shape();
-  pylonShape.moveTo(0.28, 0);
-  pylonShape.lineTo(0.12, 0);
-  pylonShape.lineTo(-0.04, 0.38);
-  pylonShape.lineTo(-0.22, 0.38);
-  pylonShape.lineTo(-0.22, 0.32);
-  pylonShape.lineTo(-0.09, 0.32);
-  pylonShape.lineTo(0.04, 0);
-  pylonShape.closePath();
-  const pylonGeo = trackGeo(
-    new THREE.ExtrudeGeometry(pylonShape, { depth: 0.035, bevelEnabled: false }),
-  );
-  pylonGeo.translate(0, 0, -0.0175);
-  pylonGeo.rotateY(-Math.PI / 2);
+    // Swan-Neck Wing Pylons
+    const pylonShape = new THREE.Shape();
+    pylonShape.moveTo(0.28, 0);
+    pylonShape.lineTo(0.12, 0);
+    pylonShape.lineTo(-0.04, 0.38);
+    pylonShape.lineTo(-0.22, 0.38);
+    pylonShape.lineTo(-0.22, 0.32);
+    pylonShape.lineTo(-0.09, 0.32);
+    pylonShape.lineTo(0.04, 0);
+    pylonShape.closePath();
+    const pylonGeo = trackGeo(
+      new THREE.ExtrudeGeometry(pylonShape, { depth: 0.035, bevelEnabled: false }),
+    );
+    pylonGeo.translate(0, 0, -0.0175);
+    pylonGeo.rotateY(-Math.PI / 2);
 
-  [-0.42, 0.42].forEach((xPos) => {
-    const pylon = new THREE.Mesh(pylonGeo, alloyMat);
-    pylon.position.set(xPos, 0.87, -2.02);
-    chassis.add(pylon);
-  });
+    [-0.42, 0.42].forEach((xPos) => {
+      const pylon = new THREE.Mesh(pylonGeo, alloyMat);
+      pylon.position.set(xPos, 0.87, -2.02);
+      chassis.add(pylon);
+    });
 
-  // Sculpted GT3 Wing Endplates + Accent Stripe
-  const endplateShape = new THREE.Shape();
-  endplateShape.moveTo(-0.26, -0.14);
-  endplateShape.lineTo(0.24, -0.10);
-  endplateShape.lineTo(0.22, 0.12);
-  endplateShape.lineTo(-0.24, 0.14);
-  endplateShape.closePath();
-  const endplateGeo = trackGeo(
-    new THREE.ExtrudeGeometry(endplateShape, { depth: 0.03, bevelEnabled: false }),
-  );
-  endplateGeo.translate(0, 0, -0.015);
-  endplateGeo.rotateY(-Math.PI / 2);
+    const endplateShape = new THREE.Shape();
+    endplateShape.moveTo(-0.26, -0.14);
+    endplateShape.lineTo(0.24, -0.10);
+    endplateShape.lineTo(0.22, wingStyle === 'twin-track' ? 0.18 : 0.12);
+    endplateShape.lineTo(-0.24, wingStyle === 'twin-track' ? 0.2 : 0.14);
+    endplateShape.closePath();
+    const endplateGeo = trackGeo(
+      new THREE.ExtrudeGeometry(endplateShape, { depth: 0.03, bevelEnabled: false }),
+    );
+    endplateGeo.translate(0, 0, -0.015);
+    endplateGeo.rotateY(-Math.PI / 2);
 
-  const endTrimGeo = trackGeo(new THREE.BoxGeometry(0.04, 0.03, 0.38));
-  [-0.96, 0.96].forEach((xPos) => {
-    const plate = new THREE.Mesh(endplateGeo, paintMat);
-    plate.position.set(xPos, 1.21, -2.10);
-    chassis.add(plate);
+    const endTrimGeo = trackGeo(new THREE.BoxGeometry(0.04, 0.03, 0.38));
+    [-span * 0.5, span * 0.5].forEach((xPos) => {
+      const plate = new THREE.Mesh(endplateGeo, paintMat);
+      plate.position.set(xPos, 1.21, -2.10);
+      chassis.add(plate);
 
-    const trim = new THREE.Mesh(endTrimGeo, accentTrimMat);
-    trim.position.set(xPos > 0 ? xPos + 0.008 : xPos - 0.008, 1.12, -2.10);
-    chassis.add(trim);
-  });
+      const trim = new THREE.Mesh(endTrimGeo, accentTrimMat);
+      trim.position.set(xPos > 0 ? xPos + 0.008 : xPos - 0.008, 1.12, -2.10);
+      chassis.add(trim);
+    });
+  }
 
   // 8. 6-Fin Rear Diffuser, FIA Rain Light, Rear Grille & Rear Tow Hook
   const diffuserBaseGeo = trackGeo(new THREE.BoxGeometry(1.64, 0.14, 0.34));
@@ -1048,7 +1136,7 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     }
 
     const tire = new THREE.Mesh(cfg.tireGeo, tireMat);
-    tire.castShadow = true;
+    tire.castShadow = !isGhost;
     spinGroup.add(tire);
 
     const rimBarrel = new THREE.Mesh(rimBarrelGeo, rimMat);
@@ -1103,7 +1191,7 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     wheelSpins.push(spinGroup);
   });
 
-  // 14. Grounded Contact Shadow Plane
+  // 14. Grounded Contact Shadow Plane & Optional Neon Underglow
   const shadowGeo = trackGeo(new THREE.PlaneGeometry(3.0, 5.4));
   shadowGeo.rotateX(-Math.PI / 2);
   const shadowMat = trackMat(
@@ -1111,12 +1199,35 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
       map: options.contactShadowTexture,
       transparent: true,
       depthWrite: false,
-      opacity: 0.9,
+      opacity: isGhost ? 0.25 : 0.9,
     }),
   );
   const shadowPlane = new THREE.Mesh(shadowGeo, shadowMat);
   shadowPlane.position.y = 0.035;
   roadAligned.add(shadowPlane);
+
+  let underglowMat: THREE.MeshBasicMaterial | null = null;
+  if (!isGhost) {
+    const glowGeo = trackGeo(new THREE.PlaneGeometry(3.5, 5.8));
+    glowGeo.rotateX(-Math.PI / 2);
+    underglowMat = trackMat(
+      new THREE.MeshBasicMaterial({
+        map: options.glowHaloTexture ?? options.contactShadowTexture,
+        color: options.underglowHex ? new THREE.Color(options.underglowHex) : 0x000000,
+        transparent: true,
+        opacity: options.underglowHex ? 0.62 : 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      }),
+    );
+    const underglowPlane = new THREE.Mesh(glowGeo, underglowMat);
+    underglowPlane.position.y = 0.042;
+    underglowPlane.visible = Boolean(options.underglowHex);
+    roadAligned.add(underglowPlane);
+  }
 
   return {
     root,
@@ -1130,6 +1241,7 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     exhaustFlameMat,
     exhaustFlames,
     paintMat,
+    underglowMat,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());

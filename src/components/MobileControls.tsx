@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronUp, OctagonX } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronUp, Flame, OctagonX } from 'lucide-react';
 import { InputState } from '../game/types';
 
 interface MobileControlsProps {
+  nitroRatio?: number;
+  nitroActive?: boolean;
   onInputChange: (next: Partial<InputState>) => void;
 }
 
@@ -54,12 +56,17 @@ const TouchPad: React.FC<TouchPadProps> = ({
   );
 };
 
-export const MobileControls: React.FC<MobileControlsProps> = ({ onInputChange }) => {
+export const MobileControls: React.FC<MobileControlsProps> = ({
+  nitroRatio = 1,
+  nitroActive = false,
+  onInputChange,
+}) => {
   const [left, setLeft] = useState(false);
   const [right, setRight] = useState(false);
   const [gas, setGas] = useState(false);
   const [brake, setBrake] = useState(false);
   const [handbrake, setHandbrake] = useState(false);
+  const [nitro, setNitro] = useState(false);
 
   return (
     <div
@@ -103,23 +110,44 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ onInputChange })
         </TouchPad>
       </div>
 
-      {/* Right Cluster: Brake/Reverse, Drift, Gas */}
-      <div className="pointer-events-auto flex items-end gap-2.5 sm:gap-3">
-        <TouchPad
-          label="Handbrake Drift"
-          active={handbrake}
-          onActiveChange={(v) => {
-            setHandbrake(v);
-            onInputChange({ handbrake: v });
-          }}
-          className={`w-14 h-14 sm:w-16 sm:h-16 ${
-            handbrake
-              ? 'bg-amber-500/85 border-amber-300 text-slate-950'
-              : 'bg-[#0B0E14]/80 border-white/20 text-slate-200'
-          }`}
-        >
-          <span className="text-[11px] font-bold tracking-wide">DRIFT</span>
-        </TouchPad>
+      {/* Right Cluster: Nitro, Drift, Brake/Reverse, Gas */}
+      <div className="pointer-events-auto flex items-end gap-2 sm:gap-3">
+        <div className="flex flex-col items-end gap-2">
+          <TouchPad
+            label="Nitrous Boost"
+            active={nitro || nitroActive}
+            onActiveChange={(v) => {
+              setNitro(v);
+              onInputChange({ nitro: v });
+            }}
+            className={`w-14 h-12 sm:w-16 sm:h-14 ${
+              nitro || nitroActive
+                ? 'bg-sky-500 border-sky-200 text-slate-950'
+                : nitroRatio > 0.08
+                  ? 'bg-[#0B0E14]/85 border-sky-400/50 text-sky-300'
+                  : 'bg-[#0B0E14]/70 border-white/10 text-slate-500'
+            }`}
+          >
+            <Flame className="w-4 h-4" />
+            <span className="text-[10px] font-bold tracking-wide">NITRO</span>
+          </TouchPad>
+
+          <TouchPad
+            label="Handbrake Drift"
+            active={handbrake}
+            onActiveChange={(v) => {
+              setHandbrake(v);
+              onInputChange({ handbrake: v });
+            }}
+            className={`w-14 h-12 sm:w-16 sm:h-14 ${
+              handbrake
+                ? 'bg-amber-500/85 border-amber-300 text-slate-950'
+                : 'bg-[#0B0E14]/80 border-white/20 text-slate-200'
+            }`}
+          >
+            <span className="text-[11px] font-bold tracking-wide">DRIFT</span>
+          </TouchPad>
+        </div>
 
         <TouchPad
           label="Brake and Reverse"
@@ -128,7 +156,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ onInputChange })
             setBrake(v);
             onInputChange({ brake: v });
           }}
-          className={`w-[68px] h-[74px] sm:w-[74px] sm:h-20 ${
+          className={`w-[66px] h-[74px] sm:w-[74px] sm:h-20 ${
             brake
               ? 'bg-red-600/90 border-red-300 text-white'
               : 'bg-[#0B0E14]/80 border-red-500/40 text-red-200'
@@ -145,7 +173,7 @@ export const MobileControls: React.FC<MobileControlsProps> = ({ onInputChange })
             setGas(v);
             onInputChange({ accelerate: v });
           }}
-          className={`w-[78px] h-[94px] sm:w-22 sm:h-24 ${
+          className={`w-[76px] h-[94px] sm:w-22 sm:h-24 ${
             gas
               ? 'bg-orange-500 border-orange-200 text-white'
               : 'bg-orange-600/85 border-orange-400/60 text-white'

@@ -49,7 +49,11 @@ export const HowToPlayModal: React.FC<ModalProps> = ({ onClose }) => {
                 <span className="text-slate-400">Handbrake Drift</span>
                 <span className="font-mono-tabular font-semibold text-white">Space</span>
               </div>
-              <div className="bg-[#0B0E14] border border-white/10 rounded-lg px-3 py-2 flex justify-between col-span-2">
+              <div className="bg-[#0B0E14] border border-white/10 rounded-lg px-3 py-2 flex justify-between">
+                <span className="text-slate-400">Nitrous Boost</span>
+                <span className="font-mono-tabular font-semibold text-sky-400">Shift / N</span>
+              </div>
+              <div className="bg-[#0B0E14] border border-white/10 rounded-lg px-3 py-2 flex justify-between">
                 <span className="text-slate-400">Pause / Resume</span>
                 <span className="font-mono-tabular font-semibold text-white">Esc</span>
               </div>
@@ -57,23 +61,23 @@ export const HowToPlayModal: React.FC<ModalProps> = ({ onClose }) => {
           </div>
 
           <div>
-            <h3 className="font-semibold text-white mb-1.5">Mobile &amp; Tablet Touch Controls</h3>
+            <h3 className="font-semibold text-white mb-1.5">Launch, Nitro &amp; Risk Mechanics</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              On touchscreens, dedicated Left/Right steering pads appear on the bottom left, while Gas, Brake/Reverse, and Drift sit on the bottom right. Hold steering and throttle simultaneously to carve through corners. You can also toggle touch controls in Settings.
+              Feather the throttle during the 3-2-1 countdown to hold RPM inside the green launch zone for an instant start burst and +100 CR. Recharge Nitrous by drifting, drafting AI slipstreams, hitting Drift King apex gates, or daring oncoming expressway lanes.
             </p>
           </div>
 
           <div>
-            <h3 className="font-semibold text-white mb-1.5">Arcade Games &amp; Rules</h3>
+            <h3 className="font-semibold text-white mb-1.5">Arcade Games &amp; Garage Career</h3>
             <div className="space-y-2 text-xs text-slate-400 leading-relaxed">
               <p>
-                <strong className="text-slate-200">Street Racer:</strong> Clear all 5 checkpoint gates in order before crossing the checkered finish gantry to complete each lap against AI rivals, the clock, or rotating Daily Challenge tasks.
+                <strong className="text-slate-200">Street Racer:</strong> Clear all checkpoints across 3 laps against AI rivals, chase your live Hologram Ghost in Time Trial, or beat rotating Daily Challenge tasks.
               </p>
               <p>
-                <strong className="text-slate-200">Highway Rush:</strong> Weave through 4 lanes of expressway traffic at high speed. Swoop close past traffic above 105 km/h to stack near-miss multipliers up to 10x—one crash ends the run.
+                <strong className="text-slate-200">Highway Rush:</strong> Weave through 4 lanes of expressway traffic. Cross the double amber line into oncoming traffic for 2x score rate and rapid Nitrous recharge.
               </p>
               <p>
-                <strong className="text-slate-200">Drift King:</strong> Hold sideways slides down the Nexora Drift Touge within 90 seconds and drift past glowing orange gates to build multipliers. Stay off the barriers—hard wall hits wipe unbanked drift points!
+                <strong className="text-slate-200">Drift King:</strong> Hold sideways slides down the Nexora Drift Touge within 90 seconds and clip glowing orange apex gates to climb multipliers and earn Garage Credits.
               </p>
             </div>
           </div>

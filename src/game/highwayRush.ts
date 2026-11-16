@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ProceduralTextureSet } from './textures';
 import { createTrafficVehicleMesh, TrafficMeshHandles, TrafficVehicleKind } from './trafficModel';
-import { InputState } from './types';
+import { EffectiveCarSpecs, InputState } from './types';
 
 export const HIGHWAY_LANE_CENTERS = [-5.4, -1.8, 1.8, 5.4];
 const ROAD_WIDTH = 16.4;
@@ -22,6 +22,7 @@ interface TrafficActor {
   x: number;
   z: number;
   speedMs: number;
+  oncoming: boolean;
   wheelAngle: number;
   nearMissed: boolean;
 }
@@ -37,6 +38,10 @@ export interface HighwayStepResult {
   skidIntensity: number;
   crashed: boolean;
   eventBanner: string | null;
+  nitroRatio: number;
+  nitroActive: boolean;
+  oncomingActive: boolean;
+  nitroTriggeredNow: boolean;
 }
 
 export class HighwayRushWorld {
@@ -49,7 +54,7 @@ export class HighwayRushWorld {
   private traffic: TrafficActor[] = [];
 
   // Player state on expressway (+Z = forward, X = lateral across 4 lanes)
-  public playerX = 1.8;
+  public playerX = -1.8;
   public playerZ = 0;
   public playerVx = 0;
   public playerSpeed = 0;
@@ -60,6 +65,12 @@ export class HighwayRushWorld {
   public chassisRoll = 0;
   public braking = false;
   public drifting = false;
+
+  // Nitro state
+  public nitroAmount = 100;
+  public nitroCapacity = 100;
+  public nitroActive = false;
+  private wasNitroActive = false;
 
   // Score & Near-Miss Combo State
   public score = 0;
@@ -106,16 +117,15 @@ export class HighwayRushWorld {
     ctx.fillRect(18, 0, 10, 512);
     ctx.fillRect(484, 0, 10, 512);
 
-    // 4-lane dashed lane dividers (at 25%, 50%, 75%)
+    // 4-lane dashed white dividers + double amber oncoming divider down the center
     ctx.fillStyle = '#CBD5E1';
     for (let y = 24; y < 512; y += 128) {
       ctx.fillRect(136, y, 7, 62);
       ctx.fillRect(369, y, 7, 62);
     }
     ctx.fillStyle = '#F59E0B';
-    for (let y = 24; y < 512; y += 128) {
-      ctx.fillRect(252, y, 8, 62);
-    }
+    ctx.fillRect(247, 0, 5, 512);
+    ctx.fillRect(260, 0, 5, 512);
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
@@ -160,7 +170,11 @@ export class HighwayRushWorld {
     );
 
     const groundMat = this.trackMat(
-      new THREE.MeshStandardMaterial({ color: 0x0e131b, roughness: 0.95 }),
+      new THREE.MeshStandardMaterial({
+        map: textures.urbanGround,
+        roughness: 0.92,
+        metalness: 0.08,
+      }),
     );
 
     const poleMat = this.trackMat(
@@ -194,15 +208,34 @@ export class HighwayRushWorld {
       }),
     );
 
-    const bldgMats = textures.buildings.map((bTex) =>
+    const podiumMat = this.trackMat(
+      new THREE.MeshStandardMaterial({
+        map: textures.buildingPodium,
+        roughness: 0.42,
+        metalness: 0.35,
+        emissive: 0xffe4b5,
+        emissiveMap: textures.buildingPodium,
+        emissiveIntensity: 0.3,
+      }),
+    );
+    const roofCapMat = this.trackMat(
+      new THREE.MeshStandardMaterial({ color: 0x161c28, roughness: 0.75, metalness: 0.4 }),
+    );
+    const metalTrimMat = this.trackMat(
+      new THREE.MeshStandardMaterial({ color: 0x2a3345, roughness: 0.3, metalness: 0.85 }),
+    );
+    const crownGlowMats = [0xf97316, 0x38bdf8, 0xfbbf24, 0x34d399].map((hex) =>
+      this.trackMat(new THREE.MeshBasicMaterial({ color: hex, toneMapped: false })),
+    );
+    const bldgMats = textures.buildings.map((bTex, vIdx) =>
       this.trackMat(
         new THREE.MeshStandardMaterial({
           map: bTex,
-          roughness: 0.45,
-          metalness: 0.35,
+          emissiveMap: textures.buildingEmissives[vIdx],
           emissive: 0xffffff,
-          emissiveMap: bTex,
-          emissiveIntensity: 0.35,
+          emissiveIntensity: 0.9,
+          roughness: vIdx === 0 || vIdx === 2 ? 0.28 : 0.62,
+          metalness: vIdx === 0 || vIdx === 2 ? 0.62 : 0.24,
         }),
       ),
     );
@@ -220,6 +253,9 @@ export class HighwayRushWorld {
     const beamGeo = this.trackGeo(new THREE.BoxGeometry(ROAD_WIDTH + 2.6, 1.15, 0.85));
     const stripGeo = this.trackGeo(new THREE.BoxGeometry(ROAD_WIDTH + 1.2, 0.22, 0.92));
     const bldgGeo = this.trackGeo(new THREE.BoxGeometry(1, 1, 1));
+    const octBldgGeo = this.trackGeo(new THREE.CylinderGeometry(0.6, 0.64, 1, 8, 1));
+    octBldgGeo.rotateY(Math.PI / 8);
+    const spireGeo = this.trackGeo(new THREE.CylinderGeometry(0.06, 0.32, 1, 6));
 
     for (let i = 0; i < CHUNK_COUNT; i++) {
       const chunkGroup = new THREE.Group();
@@ -274,21 +310,65 @@ export class HighwayRushWorld {
         chunkGroup.add(strip);
       }
 
-      // Flanking city skyline towers along both sides of the expressway
+      // Flanking composite architectural skyline towers along both sides of the expressway
       [-1, 1].forEach((side, sIdx) => {
         for (let b = 0; b < 2; b++) {
-          const h = 28 + ((i * 19 + b * 23 + sIdx * 11) % 62);
+          const h = 32 + ((i * 19 + b * 23 + sIdx * 11) % 64);
           const w = 14 + ((i * 7 + b * 13) % 12);
           const d = 14 + ((i * 11 + b * 5) % 14);
           const xDist = ROAD_WIDTH * 0.5 + 14 + b * 22 + ((i * 5 + sIdx * 9) % 10);
           const zOff = (b - 0.5) * (CHUNK_LENGTH * 0.5);
-          const tower = new THREE.Mesh(
-            bldgGeo,
-            bldgMats[(i + b + sIdx) % bldgMats.length],
-          );
-          tower.position.set(side * xDist, h * 0.5 - 0.2, zOff);
-          tower.scale.set(w, h, d);
-          chunkGroup.add(tower);
+          const bx = side * xDist;
+          const isOct = (i + b + sIdx) % 4 === 3;
+          const podiumH = 7.2 + ((i + b) % 3) * 1.1;
+          const shaftH = h * 0.66;
+          const crownH = h - shaftH;
+
+          // Street-level retail podium base
+          const podium = new THREE.Mesh(isOct ? octBldgGeo : bldgGeo, podiumMat);
+          podium.position.set(bx, podiumH * 0.5 - 0.2, zOff);
+          podium.scale.set(w * 1.12, podiumH, d * 1.12);
+          chunkGroup.add(podium);
+
+          // Main tower shaft
+          const matIdx = (i + b + sIdx) % bldgMats.length;
+          const shaft = new THREE.Mesh(isOct ? octBldgGeo : bldgGeo, bldgMats[matIdx]);
+          shaft.position.set(bx, podiumH + shaftH * 0.5 - 0.25, zOff);
+          shaft.scale.set(w, shaftH, d);
+          chunkGroup.add(shaft);
+
+          // Upper stepped setback crown
+          const crownMat = bldgMats[(matIdx + 1) % bldgMats.length];
+          const crown = new THREE.Mesh(isOct ? octBldgGeo : bldgGeo, crownMat);
+          const crownY = podiumH + shaftH + crownH * 0.5 - 0.3;
+          crown.position.set(bx, crownY, zOff);
+          crown.scale.set(w * 0.68, crownH, d * 0.68);
+          chunkGroup.add(crown);
+
+          // Dark parapet + glowing architectural crown band + rooftop mechanical unit/spire
+          const topY = podiumH + shaftH + crownH - 0.3;
+          const parapet = new THREE.Mesh(bldgGeo, roofCapMat);
+          parapet.position.set(bx, topY + 0.35, zOff);
+          parapet.scale.set(w * 0.73, 0.8, d * 0.73);
+          chunkGroup.add(parapet);
+
+          const neonBand = new THREE.Mesh(bldgGeo, crownGlowMats[(i + b + sIdx) % crownGlowMats.length]);
+          neonBand.position.set(bx, topY - 0.5, zOff);
+          neonBand.scale.set(w * 0.74, 0.38, d * 0.74);
+          chunkGroup.add(neonBand);
+
+          if (h > 64 || isOct) {
+            const spireH = 10 + ((i + sIdx) % 4) * 3;
+            const spire = new THREE.Mesh(spireGeo, metalTrimMat);
+            spire.position.set(bx, topY + spireH * 0.5 + 0.6, zOff);
+            spire.scale.set(1, spireH, 1);
+            chunkGroup.add(spire);
+          } else {
+            const hvac = new THREE.Mesh(bldgGeo, metalTrimMat);
+            hvac.position.set(bx, topY + 1.4, zOff);
+            hvac.scale.set(w * 0.34, 1.8, d * 0.34);
+            chunkGroup.add(hvac);
+          }
         }
       });
 
@@ -303,20 +383,24 @@ export class HighwayRushWorld {
       const kind = kinds[i % kinds.length];
       const mesh = createTrafficVehicleMesh(kind, i, textures.contactShadow);
       this.group.add(mesh.root);
+      const lane = i % 4;
+      const oncoming = lane >= 2;
+      mesh.root.rotation.y = oncoming ? Math.PI : 0;
       this.traffic.push({
         mesh,
-        lane: i % 4,
-        x: HIGHWAY_LANE_CENTERS[i % 4],
+        lane,
+        x: HIGHWAY_LANE_CENTERS[lane],
         z: 65 + i * 26,
-        speedMs: 22 + (i % 5) * 2.8,
+        speedMs: oncoming ? -(16 + (i % 4) * 2.5) : 22 + (i % 5) * 2.8,
+        oncoming,
         wheelAngle: 0,
         nearMissed: false,
       });
     }
   }
 
-  public reset(startingRun: boolean): void {
-    this.playerX = HIGHWAY_LANE_CENTERS[2];
+  public reset(startingRun: boolean, nitroCapacity = 100): void {
+    this.playerX = HIGHWAY_LANE_CENTERS[1];
     this.playerZ = 0;
     this.playerVx = 0;
     this.playerSpeed = startingRun ? 24 : 46;
@@ -327,6 +411,11 @@ export class HighwayRushWorld {
     this.chassisRoll = 0;
     this.braking = false;
     this.drifting = false;
+
+    this.nitroCapacity = nitroCapacity;
+    this.nitroAmount = nitroCapacity;
+    this.nitroActive = false;
+    this.wasNitroActive = false;
 
     this.score = 0;
     this.comboMultiplier = 1;
@@ -344,21 +433,24 @@ export class HighwayRushWorld {
     this.traffic.forEach((t, idx) => {
       const wave = Math.floor(idx / 3);
       const laneOffset = (idx + wave) % 4;
+      const oncoming = laneOffset >= 2;
       t.lane = laneOffset;
+      t.oncoming = oncoming;
       t.x = HIGHWAY_LANE_CENTERS[laneOffset];
-      t.z = 75 + idx * 24 + (idx % 3) * 6;
-      t.speedMs = 22 + (idx % 4) * 3.0;
+      t.z = (oncoming ? 140 : 75) + idx * 26 + (idx % 3) * 8;
+      t.speedMs = oncoming ? -(16 + (idx % 4) * 2.4) : 22 + (idx % 4) * 3.0;
       t.nearMissed = false;
       t.mesh.root.position.set(t.x, 0, t.z);
+      t.mesh.root.rotation.y = oncoming ? Math.PI : 0;
     });
   }
 
   private findSafeTrafficSpawn(actor: TrafficActor, minZ: number): void {
-    // Pick a random lane and Z ahead that avoids overlapping same-lane cars and avoids 4-lane walls
     const speedEscalation = Math.min(10, (this.playerZ / 1000) * 1.4);
     for (let attempt = 0; attempt < 16; attempt++) {
       const candidateLane = Math.floor(Math.random() * 4);
-      const candidateZ = minZ + Math.random() * 140;
+      const oncoming = candidateLane >= 2;
+      const candidateZ = minZ + (oncoming ? 65 : 0) + Math.random() * 160;
 
       let sameLaneBlocked = false;
       const nearbyOccupiedLanes = new Set<number>();
@@ -367,40 +459,46 @@ export class HighwayRushWorld {
         const other = this.traffic[i];
         if (other === actor) continue;
         const dz = Math.abs(other.z - candidateZ);
-        if (other.lane === candidateLane && dz < 26) {
+        if (other.lane === candidateLane && dz < (oncoming ? 42 : 26)) {
           sameLaneBlocked = true;
           break;
         }
-        if (dz < 14) {
+        if (dz < 16) {
           nearbyOccupiedLanes.add(other.lane);
         }
       }
 
       if (!sameLaneBlocked && nearbyOccupiedLanes.size < 3) {
         actor.lane = candidateLane;
+        actor.oncoming = oncoming;
         actor.x = HIGHWAY_LANE_CENTERS[candidateLane];
         actor.z = candidateZ;
-        actor.speedMs = 21 + Math.random() * 12 + speedEscalation;
+        actor.speedMs = oncoming
+          ? -(16 + Math.random() * 9 + speedEscalation * 0.5)
+          : 21 + Math.random() * 12 + speedEscalation;
         actor.nearMissed = false;
+        actor.mesh.root.rotation.y = oncoming ? Math.PI : 0;
         return;
       }
     }
 
-    // Safe fallback far ahead
-    actor.lane = (actor.lane + 1) % 4;
-    actor.x = HIGHWAY_LANE_CENTERS[actor.lane];
-    actor.z = minZ + 180;
+    const fallbackLane = (actor.lane + 1) % 2; // Safe same-direction fallback lane
+    actor.lane = fallbackLane;
+    actor.oncoming = false;
+    actor.x = HIGHWAY_LANE_CENTERS[fallbackLane];
+    actor.z = minZ + 185;
     actor.speedMs = 24 + speedEscalation;
     actor.nearMissed = false;
+    actor.mesh.root.rotation.y = 0;
   }
 
   public computeAttractInput(): InputState {
-    // Autopilot weaves cleanly around upcoming traffic in menu preview
+    // Autopilot weaves cleanly along standard forward lanes (0 & 1) in menu preview
     let blockedCenter = false;
-    let bestLane = 2;
+    let bestLane = 1;
     let bestClearance = -1;
 
-    for (let lane = 0; lane < 4; lane++) {
+    for (let lane = 0; lane < 2; lane++) {
       const lx = HIGHWAY_LANE_CENTERS[lane];
       let minDist = 200;
       for (let i = 0; i < this.traffic.length; i++) {
@@ -427,33 +525,64 @@ export class HighwayRushWorld {
       steerLeft: dx > 0.35,
       steerRight: dx < -0.35,
       handbrake: false,
+      nitro: false,
     };
   }
 
-  public step(input: InputState, dt: number, isActiveGame: boolean): HighwayStepResult {
+  public step(
+    input: InputState,
+    dt: number,
+    isActiveGame: boolean,
+    specs?: EffectiveCarSpecs,
+  ): HighwayStepResult {
     let eventBanner: string | null = null;
     let wallImpact = 0;
 
-    // 1. Player forward speed (always rolls forward at >= 18 m/s during rush)
+    // 1. Nitro activation, drain & passive refill on oncoming risk
+    const wantNitro = isActiveGame && !this.crashed && input.nitro && !input.brake && this.nitroAmount > 2;
+    this.nitroActive = wantNitro;
+    const nitroTriggeredNow = this.nitroActive && !this.wasNitroActive;
+    this.wasNitroActive = this.nitroActive;
+
+    if (this.nitroActive) {
+      this.nitroAmount = Math.max(0, this.nitroAmount - 26 * dt);
+    }
+
+    const oncomingActive = isActiveGame && !this.crashed && this.playerX > 0.25;
+    if (oncomingActive && !this.nitroActive) {
+      this.nitroAmount = Math.min(
+        this.nitroCapacity,
+        this.nitroAmount + 9.5 * (specs?.nitroRefillMult ?? 1) * dt,
+      );
+    }
+
+    // 2. Player forward speed scaled by Garage Upgrades + Nitro Boost
     const minCruise = isActiveGame ? 18 : 34;
-    const topSpeed = 79.0; // ~284 km/h
+    const speedMult = isActiveGame && specs ? specs.topSpeedMult : 1.0;
+    const accelMult = isActiveGame && specs ? specs.accelMult : 1.0;
+    const handlingMult = isActiveGame && specs ? specs.handlingMult : 1.0;
+    const nitroBoostMult = this.nitroActive ? 1 + 0.17 * (specs?.nitroPowerMult ?? 1.0) : 1.0;
+    const topSpeed = 79.0 * speedMult * nitroBoostMult; // Up to ~340+ km/h with hypercar + nitro
     this.braking = input.brake || input.handbrake;
 
-    if (input.accelerate && !input.brake) {
+    if ((input.accelerate || this.nitroActive) && !input.brake) {
       const ratio = Math.max(0, this.playerSpeed / topSpeed);
-      this.playerSpeed = Math.min(topSpeed, this.playerSpeed + 28 * (1 - 0.58 * ratio * ratio) * dt);
+      const accelBoost = this.nitroActive ? 1.6 : 1.0;
+      this.playerSpeed = Math.min(
+        topSpeed,
+        this.playerSpeed + 28 * accelMult * accelBoost * (1 - 0.58 * ratio * ratio) * dt,
+      );
     } else if (input.brake) {
-      this.playerSpeed = Math.max(minCruise, this.playerSpeed - 46 * dt);
+      this.playerSpeed = Math.max(minCruise, this.playerSpeed - 46 * handlingMult * dt);
     } else {
-      // Gentle speed-maintaining drag
       this.playerSpeed = Math.max(minCruise, this.playerSpeed - (this.playerSpeed * 0.18 + 1.2) * dt);
     }
 
-    // 2. Crisp lane-weaving lateral physics (+X = left, -X = right)
+    // 3. Crisp lane-weaving lateral physics (+X = left, -X = right)
     const steerInput = (input.steerLeft ? 1 : 0) - (input.steerRight ? 1 : 0);
-    const maxLatSpeed = 13.5 + Math.min(4.5, this.playerSpeed * 0.06);
+    const maxLatSpeed = (13.5 + Math.min(4.5, this.playerSpeed * 0.06)) * handlingMult;
     const targetVx = steerInput * maxLatSpeed;
-    const responsiveness = input.handbrake ? 14 : 11.5;
+    const responsiveness = (input.handbrake ? 14 : 11.5) * handlingMult;
     this.playerVx += (targetVx - this.playerVx) * Math.min(1, dt * responsiveness);
 
     this.playerX += this.playerVx * dt;
@@ -469,17 +598,26 @@ export class HighwayRushWorld {
     }
 
     // Visual chassis dynamics
-    const targetHeading = Math.max(-0.28, Math.min(0.28, (this.playerVx / Math.max(20, this.playerSpeed)) * 1.15));
+    const targetHeading = Math.max(
+      -0.28,
+      Math.min(0.28, (this.playerVx / Math.max(20, this.playerSpeed)) * 1.15),
+    );
     this.playerHeading += (targetHeading - this.playerHeading) * Math.min(1, dt * 12);
     this.steerVisual += (steerInput * 0.38 - this.steerVisual) * Math.min(1, dt * 14);
     this.wheelSpinAngle += (this.playerSpeed / 0.36) * dt;
-    const targetPitch = this.braking ? 0.036 : input.accelerate ? -0.025 : 0;
+    const targetPitch = this.braking
+      ? 0.036
+      : this.nitroActive
+        ? -0.045
+        : input.accelerate
+          ? -0.025
+          : 0;
     const targetRoll = -steerInput * 0.055;
     this.chassisPitch += (targetPitch - this.chassisPitch) * Math.min(1, dt * 10);
     this.chassisRoll += (targetRoll - this.chassisRoll) * Math.min(1, dt * 10);
     this.drifting = input.handbrake && Math.abs(this.playerVx) > 4.5;
 
-    // 3. Recycle scrolling highway chunks seamlessly ahead of player
+    // 4. Recycle scrolling highway chunks seamlessly ahead of player
     for (let i = 0; i < this.chunks.length; i++) {
       const c = this.chunks[i];
       if (c.zBase < this.playerZ - CHUNK_LENGTH * 2.5) {
@@ -488,14 +626,14 @@ export class HighwayRushWorld {
       }
     }
 
-    // 4. Step traffic, check near-misses & collisions
+    // 5. Step traffic, check near-misses & collisions
     for (let i = 0; i < this.traffic.length; i++) {
       const t = this.traffic[i];
       t.z += t.speedMs * dt;
-      t.wheelAngle += (t.speedMs / 0.32) * dt;
+      t.wheelAngle += (Math.abs(t.speedMs) / 0.32) * dt;
 
       if (t.z < this.playerZ - 32) {
-        this.findSafeTrafficSpawn(t, this.playerZ + 170);
+        this.findSafeTrafficSpawn(t, this.playerZ + 175);
       }
 
       t.mesh.root.position.set(t.x, 0, t.z);
@@ -511,12 +649,13 @@ export class HighwayRushWorld {
         if (dx < 1.82 && dz < 3.92) {
           this.crashed = true;
           this.playerSpeed = 0;
+          this.nitroActive = false;
           wallImpact = 1.0;
           break;
         }
 
-        // High-speed near-miss detection
-        if (!t.nearMissed && dx < 2.95 && dz < 4.5 && this.playerSpeed > 29) {
+        // High-speed near-miss detection (+ Nitro Refill + Oncoming 2x Bonus!)
+        if (!t.nearMissed && dx < 3.05 && dz < 4.7 && this.playerSpeed > 28) {
           t.nearMissed = true;
           this.nearMissCount += 1;
           this.comboMultiplier = Math.min(10, this.comboMultiplier + 1);
@@ -524,14 +663,21 @@ export class HighwayRushWorld {
             this.maxCombo = this.comboMultiplier;
           }
           this.comboTimer = this.comboDuration;
-          const bonus = 250 * this.comboMultiplier;
+          const oncomingBonus = t.oncoming ? 2 : 1;
+          const bonus = 250 * this.comboMultiplier * oncomingBonus;
           this.score += bonus;
-          eventBanner = `NEAR MISS! +${bonus} (${this.comboMultiplier}x)`;
+
+          const nitroGain = (t.oncoming ? 34 : 22) * (specs?.nitroRefillMult ?? 1);
+          this.nitroAmount = Math.min(this.nitroCapacity, this.nitroAmount + nitroGain);
+
+          eventBanner = t.oncoming
+            ? `ONCOMING PASS! +${bonus} (${this.comboMultiplier}x)`
+            : `NEAR MISS! +${bonus} (${this.comboMultiplier}x)`;
         }
       }
     }
 
-    // 5. Continuous speed-scaled score & combo decay
+    // 6. Continuous speed-scaled score (2x in oncoming lanes!) & combo decay
     if (isActiveGame && !this.crashed) {
       if (this.comboTimer > 0) {
         this.comboTimer -= dt;
@@ -540,8 +686,9 @@ export class HighwayRushWorld {
           this.comboMultiplier = 1;
         }
       }
+      const oncomingMult = oncomingActive ? 2 : 1;
       const speedBonusRate = Math.max(0, (this.playerSpeed - 18) * 3.8);
-      this.score += speedBonusRate * this.comboMultiplier * dt;
+      this.score += speedBonusRate * this.comboMultiplier * oncomingMult * dt;
     }
 
     return {
@@ -555,6 +702,10 @@ export class HighwayRushWorld {
       skidIntensity: this.drifting ? 0.65 : 0,
       crashed: this.crashed,
       eventBanner,
+      nitroRatio: this.nitroCapacity > 0 ? Math.max(0, Math.min(1, this.nitroAmount / this.nitroCapacity)) : 0,
+      nitroActive: this.nitroActive,
+      oncomingActive,
+      nitroTriggeredNow,
     };
   }
 

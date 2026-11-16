@@ -1,5 +1,5 @@
 import { CityCircuit } from './track';
-import { Difficulty, InputState } from './types';
+import { Difficulty, EffectiveCarSpecs, InputState } from './types';
 
 export interface VehicleState {
   id: string;
@@ -20,6 +20,7 @@ export interface VehicleState {
   roadPitch: number;
   braking: boolean;
   drifting: boolean;
+  nitroActive: boolean;
   trackSampleIndex: number;
   trackDistance: number;
   lateralOffset: number;
@@ -82,6 +83,7 @@ export function createVehicleOnGrid(
     roadPitch: -Math.asin(Math.max(-0.5, Math.min(0.5, sample.tangent.y))),
     braking: false,
     drifting: false,
+    nitroActive: false,
     trackSampleIndex: sample.index,
     trackDistance: sample.distance,
     lateralOffset: col,
@@ -133,6 +135,7 @@ export function computeAiInput(
     steerLeft: angleDiff > 0.045,
     steerRight: angleDiff < -0.045,
     handbrake: false,
+    nitro: false,
   };
 }
 
@@ -144,6 +147,8 @@ export function stepVehiclePhysics(
   raceElapsedMs: number,
   totalLaps: number,
   isLapTrackingMode: boolean,
+  specs?: EffectiveCarSpecs,
+  slipstreamActive = false,
 ): StepPhysicsResult {
   const prevDist = v.trackDistance;
 
@@ -157,19 +162,31 @@ export function stepVehiclePhysics(
   let forwardVel = v.vx * fwdX + v.vz * fwdZ;
   let lateralVel = v.vx * rightX + v.vz * rightZ;
 
-  const topSpeed = v.isPlayer ? 68.5 : 67.5; // ~246 km/h
+  const speedMult = v.isPlayer && specs ? specs.topSpeedMult : 1.0;
+  const accelMult = v.isPlayer && specs ? specs.accelMult : 1.0;
+  const handlingMult = v.isPlayer && specs ? specs.handlingMult : 1.0;
+  const driftGripMult = v.isPlayer && specs ? specs.driftGripMult : 1.0;
+  const nitroBoostMult = v.isPlayer && input.nitro ? 1 + 0.17 * (specs?.nitroPowerMult ?? 1.0) : 1.0;
+  const slipstreamMult = v.isPlayer && slipstreamActive ? 1.11 : 1.0;
+
+  const baseTopSpeed = v.isPlayer ? 68.5 : 67.5;
+  const topSpeed = baseTopSpeed * speedMult * nitroBoostMult * slipstreamMult;
   const maxReverse = -21;
 
+  v.nitroActive = Boolean(v.isPlayer && input.nitro && !input.brake && forwardVel >= -1);
+
   let braking = false;
-  if (input.accelerate && !input.brake) {
-    // Punchy arcade acceleration curve
+  if ((input.accelerate || v.nitroActive) && !input.brake) {
+    // Punchy arcade acceleration curve + Nitrous kick
     const speedRatio = Math.max(0, forwardVel / topSpeed);
-    const accel = 29 * (1 - 0.62 * speedRatio * speedRatio);
+    const nitroAccel = v.nitroActive ? 1.56 * (specs?.nitroPowerMult ?? 1.0) : 1.0;
+    const draftAccel = slipstreamActive ? 1.14 : 1.0;
+    const accel = 29 * accelMult * nitroAccel * draftAccel * (1 - 0.6 * speedRatio * speedRatio);
     forwardVel += accel * dt;
     if (forwardVel > topSpeed) forwardVel = topSpeed;
   } else if (input.brake) {
     if (forwardVel > 1.8) {
-      forwardVel = Math.max(0, forwardVel - 46 * dt);
+      forwardVel = Math.max(0, forwardVel - 46 * handlingMult * dt);
       braking = true;
     } else {
       forwardVel = Math.max(maxReverse, forwardVel - 22 * dt);
@@ -187,18 +204,18 @@ export function stepVehiclePhysics(
 
   // Handbrake slows slightly and loosens rear lateral grip
   if (input.handbrake && Math.abs(forwardVel) > 2) {
-    forwardVel *= Math.max(0, 1 - 1.15 * dt);
+    forwardVel *= Math.max(0, 1 - 1.1 * dt);
     braking = true;
   }
 
-  // Speed-sensitive steering
+  // Speed-sensitive steering scaled by vehicle handling rating
   const steerInput = (input.steerLeft ? 1 : 0) - (input.steerRight ? 1 : 0);
   const speedAbs = Math.abs(forwardVel);
   const steerEnable = Math.min(1, speedAbs / 3.5);
-  const highSpeedDamp = 1 / (1 + speedAbs * 0.014);
-  const handbrakeTurnBoost = input.handbrake ? 1.28 : 1.0;
+  const highSpeedDamp = 1 / (1 + speedAbs * (0.014 / handlingMult));
+  const handbrakeTurnBoost = input.handbrake ? 1.3 : 1.0;
   const steerDir = forwardVel >= -0.4 ? 1 : -1;
-  const maxTurnRate = 2.35 * steerEnable * highSpeedDamp * handbrakeTurnBoost;
+  const maxTurnRate = 2.35 * handlingMult * steerEnable * highSpeedDamp * handbrakeTurnBoost;
 
   const targetSteerVisual = steerInput * 0.42;
   v.steerVisual += (targetSteerVisual - v.steerVisual) * Math.min(1, dt * 14);
@@ -211,8 +228,8 @@ export function stepVehiclePhysics(
   const nRightX = -Math.cos(v.heading);
   const nRightZ = Math.sin(v.heading);
 
-  // Apply lateral tire grip (damps sideways slip; looser during handbrake)
-  const lateralGrip = input.handbrake ? 2.6 : 9.4;
+  // Apply lateral tire grip (damps sideways slip; looser during handbrake or Drift Spec)
+  const lateralGrip = (input.handbrake ? 2.4 : 9.4) * driftGripMult * (input.handbrake ? 1 : handlingMult);
   lateralVel *= Math.exp(-lateralGrip * dt);
 
   // Reconstruct world horizontal velocity
@@ -263,8 +280,14 @@ export function stepVehiclePhysics(
   v.speed = v.vx * nFwdX + v.vz * nFwdZ;
   v.braking = braking;
 
-  // Visual suspension lean (pitch on throttle/brake, roll on steer/lateral)
-  const targetPitch = input.brake ? 0.04 : input.accelerate ? -0.025 : 0;
+  // Visual suspension lean (pitch on throttle/nitro/brake, roll on steer/lateral)
+  const targetPitch = input.brake
+    ? 0.042
+    : v.nitroActive
+      ? -0.045
+      : input.accelerate
+        ? -0.025
+        : 0;
   const targetRoll = -steerInput * Math.min(1, speedAbs / 24) * 0.055;
   v.chassisPitch += (targetPitch - v.chassisPitch) * Math.min(1, dt * 10);
   v.chassisRoll += (targetRoll - v.chassisRoll) * Math.min(1, dt * 10);
@@ -276,7 +299,9 @@ export function stepVehiclePhysics(
   const lateralSlip = Math.abs(lateralVel);
   const drifting = (input.handbrake && speedAbs > 9) || lateralSlip > 5.2;
   v.drifting = drifting;
-  const skidIntensity = drifting ? Math.min(1, Math.max(lateralSlip / 14, input.handbrake ? 0.65 : 0)) : 0;
+  const skidIntensity = drifting
+    ? Math.min(1, Math.max(lateralSlip / 14, input.handbrake ? 0.65 : 0))
+    : 0;
 
   // Wrong-way detection
   const headingDotTrack = nFwdX * proj.sample.tangent.x + nFwdZ * proj.sample.tangent.z;

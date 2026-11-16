@@ -234,6 +234,15 @@ export const ReplayOverlay: React.FC<ReplayOverlayProps> = ({
             >
               DRIFT
             </span>
+            <span
+              className={`px-2 h-7 rounded-md flex items-center justify-center border text-[10px] font-bold tracking-wide ${
+                recordedInput.nitro
+                  ? 'bg-sky-400 border-sky-200 text-slate-950'
+                  : 'bg-[#090B10] border-white/10 text-slate-500'
+              }`}
+            >
+              N2O
+            </span>
           </div>
 
           {/* Camera Mode Switcher */}

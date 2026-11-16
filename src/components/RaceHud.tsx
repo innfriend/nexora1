@@ -1,5 +1,15 @@
 import React, { useMemo } from 'react';
-import { Camera, CheckCircle2, Circle, Pause, Volume2, VolumeX } from 'lucide-react';
+import {
+  AlertTriangle,
+  Camera,
+  CheckCircle2,
+  Circle,
+  Flame,
+  Pause,
+  Volume2,
+  VolumeX,
+  Wind,
+} from 'lucide-react';
 import { formatRaceTime } from '../game/storage';
 import { CameraPreset, GameMode, GamePhase, HudTelemetry, InputState } from '../game/types';
 import { MobileControls } from './MobileControls';
@@ -197,6 +207,12 @@ export const RaceHud: React.FC<RaceHudProps> = ({
                 style={{ width: `${Math.round((telemetry.comboTimerRatio ?? 0) * 100)}%` }}
               />
             </div>
+            {telemetry.oncomingActive && (
+              <div className="mt-1.5 flex items-center justify-center gap-1 text-[10px] font-bold tracking-wider text-red-400 uppercase">
+                <AlertTriangle className="w-3 h-3" />
+                <span>Oncoming Blitz · 2x Score</span>
+              </div>
+            )}
           </div>
         ) : telemetry.gameTitle === 'drift-king' ? (
           <div className="bg-[#0B0E14]/88 border border-white/12 rounded-xl px-4 py-2 sm:px-6 sm:py-2.5 text-center min-w-[175px]">
@@ -225,22 +241,44 @@ export const RaceHud: React.FC<RaceHudProps> = ({
             )}
           </div>
         ) : (
-          <div className="bg-[#0B0E14]/88 border border-white/12 rounded-xl px-4 py-2 sm:px-5 sm:py-2.5 text-center">
-            <div className="text-[11px] font-medium text-slate-400">
-              {mode === 'free-drive' ? 'Drive Time' : 'Race Time'}
+          <div className="flex flex-col items-center gap-1.5">
+            <div className="bg-[#0B0E14]/88 border border-white/12 rounded-xl px-4 py-2 sm:px-5 sm:py-2.5 text-center">
+              <div className="text-[11px] font-medium text-slate-400">
+                {mode === 'free-drive' ? 'Drive Time' : 'Race Time'}
+              </div>
+              <div className="font-mono-tabular font-bold text-lg sm:text-2xl text-white tracking-tight leading-tight">
+                {formatRaceTime(telemetry.raceTimeMs)}
+              </div>
+              {mode !== 'free-drive' && (
+                <div className="mt-0.5 flex items-center justify-center gap-2 text-[11px] text-slate-400 font-mono-tabular">
+                  <span>Lap {formatRaceTime(telemetry.currentLapTimeMs)}</span>
+                  {telemetry.bestLapTimeMs !== null && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-amber-400">Best {formatRaceTime(telemetry.bestLapTimeMs)}</span>
+                    </>
+                  )}
+                  {telemetry.ghostActive && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-sky-400">Ghost Live</span>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="font-mono-tabular font-bold text-lg sm:text-2xl text-white tracking-tight leading-tight">
-              {formatRaceTime(telemetry.raceTimeMs)}
-            </div>
-            {mode !== 'free-drive' && (
-              <div className="mt-0.5 flex items-center justify-center gap-2 text-[11px] text-slate-400 font-mono-tabular">
-                <span>Lap {formatRaceTime(telemetry.currentLapTimeMs)}</span>
-                {telemetry.bestLapTimeMs !== null && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span className="text-amber-400">Best {formatRaceTime(telemetry.bestLapTimeMs)}</span>
-                  </>
-                )}
+
+            {telemetry.splitDeltaMs !== null && telemetry.splitDeltaMs !== undefined && (
+              <div
+                key={telemetry.splitDeltaSeq}
+                className={`px-3 py-1 rounded-lg border font-mono-tabular text-xs font-bold ${
+                  telemetry.splitDeltaMs <= 0
+                    ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-300'
+                    : 'bg-red-950/90 border-red-500/50 text-red-300'
+                }`}
+              >
+                Split {telemetry.splitDeltaMs <= 0 ? '-' : '+'}
+                {(Math.abs(telemetry.splitDeltaMs) / 1000).toFixed(2)}s
               </div>
             )}
           </div>
@@ -279,15 +317,44 @@ export const RaceHud: React.FC<RaceHudProps> = ({
         </div>
       </div>
 
-      {/* Center Screen Alerts (Countdown, Lap Banner, Wrong Way) */}
+      {/* Center Screen Alerts (Countdown + Perfect Launch RPM, Banners, Slipstream, Wrong Way) */}
       <div className="flex flex-col items-center justify-center gap-3 my-auto">
         {phase === 'countdown' && telemetry.countdownValue > 0 && (
-          <div className="bg-[#090B10]/90 border border-orange-500/40 rounded-2xl px-10 py-6 text-center">
-            <div className="text-xs font-semibold tracking-widest text-orange-400 uppercase mb-1">
-              Get Ready
+          <div className="bg-[#090B10]/92 border border-orange-500/40 rounded-2xl px-8 py-6 text-center w-[280px] sm:w-[320px] space-y-3">
+            <div>
+              <div className="text-xs font-semibold tracking-widest text-orange-400 uppercase mb-1">
+                Launch Control
+              </div>
+              <div className="font-display font-bold text-7xl sm:text-8xl text-white tabular-nums leading-none">
+                {telemetry.countdownValue}
+              </div>
             </div>
-            <div className="font-display font-bold text-7xl sm:text-8xl text-white tabular-nums leading-none">
-              {telemetry.countdownValue}
+
+            <div className="space-y-1.5 pt-1">
+              <div className="relative h-3.5 w-full rounded-md bg-white/10 border border-white/15 overflow-hidden">
+                {/* Green Sweet-Spot Launch Zone [64%..88%] */}
+                <div
+                  className="absolute inset-y-0 bg-emerald-500/35 border-x border-emerald-400"
+                  style={{
+                    left: `${Math.round((telemetry.launchZone?.[0] ?? 0.64) * 100)}%`,
+                    width: `${Math.round(((telemetry.launchZone?.[1] ?? 0.88) - (telemetry.launchZone?.[0] ?? 0.64)) * 100)}%`,
+                  }}
+                />
+                {/* Live Rev Fill */}
+                <div
+                  className={`h-full transition-[width] duration-75 ${
+                    (telemetry.launchGauge ?? 0) > (telemetry.launchZone?.[1] ?? 0.88)
+                      ? 'bg-red-500'
+                      : (telemetry.launchGauge ?? 0) >= (telemetry.launchZone?.[0] ?? 0.64)
+                        ? 'bg-emerald-400'
+                        : 'bg-orange-400'
+                  }`}
+                  style={{ width: `${Math.round((telemetry.launchGauge ?? 0) * 100)}%` }}
+                />
+              </div>
+              <div className="text-[11px] font-medium text-slate-300">
+                Hold Gas to hit Green Zone (+100 CR Burst)
+              </div>
             </div>
           </div>
         )}
@@ -297,6 +364,13 @@ export const RaceHud: React.FC<RaceHudProps> = ({
             <span className="font-display font-bold text-2xl sm:text-4xl tracking-wider text-orange-400">
               {telemetry.bannerText}
             </span>
+          </div>
+        )}
+
+        {phase === 'racing' && telemetry.slipstreamActive && (
+          <div className="inline-flex items-center gap-2 bg-sky-950/90 border border-sky-400/60 rounded-lg px-4 py-1.5 text-xs font-bold tracking-wider text-sky-300 uppercase">
+            <Wind className="w-4 h-4" />
+            <span>Slipstream Drafting · Recharging Nitro</span>
           </div>
         )}
 
@@ -369,12 +443,14 @@ export const RaceHud: React.FC<RaceHudProps> = ({
             <span aria-hidden="true">·</span>
             <span>Space: Drift</span>
             <span aria-hidden="true">·</span>
+            <span className="text-sky-400 font-medium">Shift / N: Nitro</span>
+            <span aria-hidden="true">·</span>
             <span>Esc: Pause</span>
           </div>
         )}
 
-        {/* Digital Speedometer & Gear Gauge */}
-        <div className="bg-[#0B0E14]/88 border border-white/12 rounded-xl px-4 py-2.5 sm:px-5 sm:py-3 min-w-[148px] sm:min-w-[176px]">
+        {/* Digital Speedometer, Gear & Nitrous Boost Gauge */}
+        <div className="bg-[#0B0E14]/88 border border-white/12 rounded-xl px-4 py-2.5 sm:px-5 sm:py-3 min-w-[162px] sm:min-w-[192px] space-y-2">
           <div className="flex items-end justify-between gap-3">
             <div>
               <div className="font-display font-bold text-4xl sm:text-5xl text-white tabular-nums leading-none">
@@ -391,7 +467,7 @@ export const RaceHud: React.FC<RaceHudProps> = ({
           </div>
 
           {/* Segmented RPM Bar */}
-          <div className="mt-2.5 grid grid-cols-10 gap-1" aria-hidden="true">
+          <div className="grid grid-cols-10 gap-1" aria-hidden="true">
             {Array.from({ length: 10 }).map((_, idx) => {
               const threshold = (idx + 1) / 10;
               const active = telemetry.rpmRatio >= threshold - 0.05;
@@ -405,12 +481,41 @@ export const RaceHud: React.FC<RaceHudProps> = ({
               );
             })}
           </div>
+
+          {/* Nitrous Tank Bar */}
+          <div className="space-y-1 pt-0.5">
+            <div className="flex items-center justify-between text-[10px] font-semibold">
+              <span
+                className={`inline-flex items-center gap-1 uppercase tracking-wider ${
+                  telemetry.nitroActive ? 'text-sky-300' : 'text-sky-400'
+                }`}
+              >
+                <Flame className="w-3 h-3" />
+                <span>{telemetry.nitroActive ? 'Nitro Active' : 'Nitro (Shift)'}</span>
+              </span>
+              <span className="font-mono-tabular text-slate-300">
+                {Math.round((telemetry.nitroRatio ?? 0) * 100)}%
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-xs bg-white/10 overflow-hidden">
+              <div
+                className={`h-full transition-[width] duration-75 ${
+                  telemetry.nitroActive ? 'bg-sky-300' : 'bg-sky-500'
+                }`}
+                style={{ width: `${Math.round((telemetry.nitroRatio ?? 0) * 100)}%` }}
+              />
+            </div>
+          </div>
         </div>
       </div>
 
       {/* Multi-touch Mobile Controls */}
       {showTouchControls && phase !== 'paused' && phase !== 'finished' && (
-        <MobileControls onInputChange={onTouchInput} />
+        <MobileControls
+          nitroRatio={telemetry.nitroRatio}
+          nitroActive={telemetry.nitroActive}
+          onInputChange={onTouchInput}
+        />
       )}
     </div>
   );

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import heroFallbackImg from './assets/images/nexora_circuit_hero_1794683666595.jpg';
+import { GarageModal } from './components/GarageModal';
 import { AboutModal, HowToPlayModal } from './components/InfoModals';
 import { LandingOverlay } from './components/LandingOverlay';
 import { PauseModal } from './components/PauseModal';
@@ -10,6 +11,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { RaceAudioEngine } from './game/audio';
 import { getDailyChallengeSnapshot, getTodayDateKey } from './game/dailyChallenge';
 import { NexoraRaceEngine } from './game/engine';
+import { loadPlayerProfile } from './game/progression';
 import { loadRecords, loadSettings, saveSettings } from './game/storage';
 import {
   BestRecords,
@@ -22,6 +24,7 @@ import {
   GameTitle,
   HudTelemetry,
   InputState,
+  PlayerProfile,
   RaceResult,
   ReplayCameraMode,
   ReplayStatus,
@@ -46,6 +49,9 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   drifting: false,
   bannerText: null,
   markers: [],
+  nitroRatio: 1,
+  nitroActive: false,
+  slipstreamActive: false,
 };
 
 export default function App() {
@@ -55,6 +61,7 @@ export default function App() {
 
   const [settings, setSettings] = useState<GameSettings>(() => loadSettings());
   const [records, setRecords] = useState<BestRecords>(() => loadRecords());
+  const [profile, setProfile] = useState<PlayerProfile>(() => loadPlayerProfile());
   const [dailyChallenge, setDailyChallenge] = useState<DailyChallengeSnapshot>(() =>
     getDailyChallengeSnapshot(),
   );
@@ -70,7 +77,9 @@ export default function App() {
     bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   }>({ points: [], bounds: { minX: -150, maxX: 170, minZ: -140, maxZ: 155 } });
 
-  const [activeModal, setActiveModal] = useState<'none' | 'settings' | 'howto' | 'about'>('none');
+  const [activeModal, setActiveModal] = useState<
+    'none' | 'garage' | 'settings' | 'howto' | 'about'
+  >('none');
   const [isTouchDevice, setIsTouchDevice] = useState(false);
 
   // Track touch capability for Auto touch controls
@@ -110,6 +119,7 @@ export default function App() {
       onRaceFinished: (result) => {
         setRaceResult(result);
         setRecords(loadRecords());
+        setProfile(loadPlayerProfile());
         setDailyChallenge(getDailyChallengeSnapshot());
       },
       onReplayStatus: (status) => {
@@ -133,11 +143,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Push settings updates cleanly to engine & persistence
+  // Push settings & profile updates cleanly to engine & persistence
   const handleUpdateSettings = useCallback((next: GameSettings) => {
     setSettings(next);
     saveSettings(next);
     engineRef.current?.updateSettings(next);
+  }, []);
+
+  const handleUpdateProfile = useCallback((next: PlayerProfile) => {
+    setProfile(next);
+    engineRef.current?.syncProfile(next);
   }, []);
 
   // Refresh Daily Challenge automatically across local midnight while on menu
@@ -274,6 +289,7 @@ export default function App() {
         steerLeft: keyMap.has('KeyA') || keyMap.has('ArrowLeft'),
         steerRight: keyMap.has('KeyD') || keyMap.has('ArrowRight'),
         handbrake: keyMap.has('Space'),
+        nitro: keyMap.has('ShiftLeft') || keyMap.has('ShiftRight') || keyMap.has('KeyN'),
       });
     };
 
@@ -359,6 +375,7 @@ export default function App() {
           selectedMode={selectedMode}
           settings={settings}
           records={records}
+          profile={profile}
           dailyChallenge={dailyChallenge}
           webglError={webglError}
           fallbackImageSrc={heroFallbackImg}
@@ -395,6 +412,10 @@ export default function App() {
             handleUpdateSettings({ ...settings, liveryId });
           }}
           onStartRace={handleStartRace}
+          onOpenGarage={() => {
+            audioRef.current?.playUiClick();
+            setActiveModal('garage');
+          }}
           onOpenHowToPlay={() => {
             audioRef.current?.playUiClick();
             setActiveModal('howto');
@@ -458,12 +479,31 @@ export default function App() {
       )}
 
       {/* Post-Race Results Modal */}
-      {phase === 'finished' && raceResult && (
+      {phase === 'finished' && raceResult && activeModal === 'none' && (
         <ResultsModal
           result={raceResult}
           onWatchReplay={() => handleWatchReplay('finished')}
+          onOpenGarage={() => {
+            audioRef.current?.playUiClick();
+            setActiveModal('garage');
+          }}
           onRestart={handleStartRace}
           onMainMenu={handleReturnToMenu}
+        />
+      )}
+
+      {/* Garage & Tuning Modal */}
+      {activeModal === 'garage' && (
+        <GarageModal
+          profile={profile}
+          liveryId={settings.liveryId}
+          onUpdateProfile={handleUpdateProfile}
+          onSelectLivery={(liveryId) => handleUpdateSettings({ ...settings, liveryId })}
+          onPlayClickSound={() => audioRef.current?.playUiClick()}
+          onClose={() => {
+            audioRef.current?.playUiClick();
+            setActiveModal('none');
+          }}
         />
       )}
 
@@ -471,6 +511,7 @@ export default function App() {
       {activeModal === 'settings' && (
         <SettingsModal
           settings={settings}
+          unlockedLiveries={profile.unlockedLiveries}
           onUpdate={handleUpdateSettings}
           onClose={() => {
             audioRef.current?.playUiClick();
