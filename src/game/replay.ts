@@ -12,7 +12,9 @@ export interface ReplayVehicleSnapshot {
   wheelSpinAngle: number;
   chassisPitch: number;
   chassisRoll: number;
+  chassisHeave?: number;
   roadPitch: number;
+  wheelTravel?: [number, number, number, number];
   braking: boolean;
   drifting: boolean;
 }
@@ -86,7 +88,9 @@ export class ReplayRecorder {
         wheelSpinAngle: v.wheelSpinAngle,
         chassisPitch: v.chassisPitch,
         chassisRoll: v.chassisRoll,
+        chassisHeave: v.chassisHeave,
         roadPitch: v.roadPitch,
+        wheelTravel: [v.wheelTravel[0], v.wheelTravel[1], v.wheelTravel[2], v.wheelTravel[3]],
         braking: v.braking,
         drifting: v.drifting,
       })),
@@ -176,7 +180,14 @@ export function sampleReplayAtTime(
       wheelSpinAngle: lerp(va.wheelSpinAngle, vb.wheelSpinAngle, alpha),
       chassisPitch: lerp(va.chassisPitch, vb.chassisPitch, alpha),
       chassisRoll: lerp(va.chassisRoll, vb.chassisRoll, alpha),
+      chassisHeave: lerp(va.chassisHeave ?? 0, vb.chassisHeave ?? 0, alpha),
       roadPitch: lerp(va.roadPitch, vb.roadPitch, alpha),
+      wheelTravel: [
+        lerp(va.wheelTravel?.[0] ?? 0, vb.wheelTravel?.[0] ?? 0, alpha),
+        lerp(va.wheelTravel?.[1] ?? 0, vb.wheelTravel?.[1] ?? 0, alpha),
+        lerp(va.wheelTravel?.[2] ?? 0, vb.wheelTravel?.[2] ?? 0, alpha),
+        lerp(va.wheelTravel?.[3] ?? 0, vb.wheelTravel?.[3] ?? 0, alpha),
+      ],
       braking: va.braking,
       drifting: va.drifting,
     };

@@ -8,6 +8,9 @@ export interface SportsCarMeshHandles {
   frontLeftSteer: THREE.Group;
   frontRightSteer: THREE.Group;
   wheelSpins: THREE.Group[];
+  wheelMounts: THREE.Group[];
+  coilSprings: THREE.Mesh[];
+  wishboneArms: THREE.Mesh[];
   brakeLightMat: THREE.MeshStandardMaterial;
   brakeHaloMat: THREE.MeshBasicMaterial;
   exhaustFlameMat: THREE.MeshBasicMaterial;
@@ -1111,9 +1114,30 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
   discGeo.rotateZ(Math.PI / 2);
   const caliperGeo = trackGeo(new THREE.BoxGeometry(0.095, 0.18, 0.135));
 
+  // Helical Coilover Spring + Telescopic Damper + Articulating Lower Wishbone Arm
+  const coilPts: THREE.Vector3[] = [];
+  const coilTurns = 4.5;
+  const coilSamples = 40;
+  const coilRestLen = 0.28;
+  for (let i = 0; i <= coilSamples; i++) {
+    const t = i / coilSamples;
+    const ang = t * coilTurns * Math.PI * 2;
+    coilPts.push(
+      new THREE.Vector3(Math.cos(ang) * 0.044, -t * coilRestLen, Math.sin(ang) * 0.044),
+    );
+  }
+  const coilGeo = trackGeo(
+    new THREE.TubeGeometry(new THREE.CatmullRomCurve3(coilPts), 40, 0.0105, 6, false),
+  );
+  const damperTubeGeo = trackGeo(new THREE.CylinderGeometry(0.018, 0.018, 0.24, 8));
+  const wishboneGeo = trackGeo(new THREE.BoxGeometry(0.36, 0.026, 0.13));
+
   const frontLeftSteer = new THREE.Group();
   const frontRightSteer = new THREE.Group();
   const wheelSpins: THREE.Group[] = [];
+  const wheelMounts: THREE.Group[] = [];
+  const coilSprings: THREE.Mesh[] = [];
+  const wishboneArms: THREE.Mesh[] = [];
 
   const wheelConfigs = [
     { x: 0.94, z: 1.42, width: frontWidth, tireGeo: frontTireGeo, steerGroup: frontLeftSteer },
@@ -1123,9 +1147,34 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
   ];
 
   wheelConfigs.forEach((cfg) => {
+    const sign = cfg.x > 0 ? 1 : -1;
     const mount = new THREE.Group();
     mount.position.set(cfg.x, wheelRadius, cfg.z);
-    root.add(mount);
+    roadAligned.add(mount);
+    wheelMounts.push(mount);
+
+    // Visible coilover spring anchored at upper strut tower (scales vertically in Y as wheel compresses)
+    const coil = new THREE.Mesh(coilGeo, caliperMat);
+    coil.position.set(sign * 0.76, 0.64, cfg.z);
+    coil.rotation.z = sign * 0.12;
+    roadAligned.add(coil);
+    coilSprings.push(coil);
+
+    // Telescopic alloy damper rod attached to upright
+    const damper = new THREE.Mesh(damperTubeGeo, alloyMat);
+    damper.position.set(sign * -0.18, 0.14, 0);
+    damper.rotation.z = sign * 0.12;
+    mount.add(damper);
+
+    // Lower A-arm wishbone pivoting between chassis subframe and wheel hub upright
+    wishboneGeo.translate(sign * 0.18, 0, 0);
+    const armGeo = wishboneGeo.clone();
+    wishboneGeo.translate(-sign * 0.18, 0, 0);
+    trackGeo(armGeo);
+    const wishbone = new THREE.Mesh(armGeo, darkTrimMat);
+    wishbone.position.set(sign * 0.54, 0.32, cfg.z);
+    roadAligned.add(wishbone);
+    wishboneArms.push(wishbone);
 
     const spinGroup = new THREE.Group();
     if (cfg.steerGroup) {
@@ -1142,7 +1191,6 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     const rimBarrel = new THREE.Mesh(rimBarrelGeo, rimMat);
     spinGroup.add(rimBarrel);
 
-    const sign = cfg.x > 0 ? 1 : -1;
     const faceX = sign * (cfg.width * 0.36);
 
     const rimLip = new THREE.Mesh(rimLipGeo, rimMat);
@@ -1236,6 +1284,9 @@ export function createSportsCarMesh(options: CarMeshOptions): SportsCarMeshHandl
     frontLeftSteer,
     frontRightSteer,
     wheelSpins,
+    wheelMounts,
+    coilSprings,
+    wishboneArms,
     brakeLightMat,
     brakeHaloMat,
     exhaustFlameMat,

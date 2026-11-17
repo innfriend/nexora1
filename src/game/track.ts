@@ -29,10 +29,12 @@ export interface CityCircuit {
   totalLength: number;
   roadHalfWidth: number;
   barrierHalfWidth: number;
+  roadSurfaceOffset: number;
   checkpointDistances: number[];
   group: THREE.Group;
   getClosestSample: (x: number, y: number, z: number, hintIndex?: number) => TrackProjection;
   getSampleAtDistance: (distance: number) => TrackSample;
+  getHeightAtDistance: (distance: number) => number;
   getMinimapPath: () => { points: Array<{ x: number; z: number }>; bounds: { minX: number; maxX: number; minZ: number; maxZ: number } };
   dispose: () => void;
 }
@@ -531,9 +533,9 @@ export function createCityCircuit(
   );
   group.add(cityArch.group);
 
-  // Track query functions
+  // Track query functions (segment-interpolated so wall clearance matches linear barrier segments)
   const getClosestSample = (x: number, y: number, z: number, hintIndex?: number): TrackProjection => {
-    let bestSample = samples[0];
+    let bestIdx = 0;
     let bestDistSq = Infinity;
 
     if (hintIndex !== undefined) {
@@ -548,7 +550,7 @@ export function createCityCircuit(
         const distSq = dx * dx + dz * dz + dy * dy * 4.0;
         if (distSq < bestDistSq) {
           bestDistSq = distSq;
-          bestSample = s;
+          bestIdx = idx;
         }
       }
     }
@@ -564,20 +566,74 @@ export function createCityCircuit(
         const distSq = dx * dx + dz * dz + dy * dy * 4.0;
         if (distSq < bestDistSq) {
           bestDistSq = distSq;
-          bestSample = s;
+          bestIdx = i;
         }
       }
     }
 
-    const relX = x - bestSample.position.x;
-    const relZ = z - bestSample.position.z;
-    const lateralOffset = relX * bestSample.right.x + relZ * bestSample.right.z;
-    const headingAngle = Math.atan2(bestSample.tangent.x, bestSample.tangent.z);
+    // Refine onto the exact linear segment connecting neighboring track samples
+    const prevIdx = (bestIdx - 1 + SAMPLE_COUNT) % SAMPLE_COUNT;
+    const nextIdx = (bestIdx + 1) % SAMPLE_COUNT;
+
+    const evalSeg = (idxA: number, idxB: number) => {
+      const a = samples[idxA];
+      const b = samples[idxB];
+      const abX = b.position.x - a.position.x;
+      const abZ = b.position.z - a.position.z;
+      const lenSq = abX * abX + abZ * abZ;
+      const alpha =
+        lenSq > 0.0001
+          ? Math.max(0, Math.min(1, ((x - a.position.x) * abX + (z - a.position.z) * abZ) / lenSq))
+          : 0;
+      const px = a.position.x + abX * alpha;
+      const py = a.position.y + (b.position.y - a.position.y) * alpha;
+      const pz = a.position.z + abZ * alpha;
+      const dx = x - px;
+      const dy = y - py;
+      const dz = z - pz;
+      return {
+        a,
+        b,
+        alpha,
+        distSq: dx * dx + dz * dz + dy * dy * 4.0,
+        px,
+        py,
+        pz,
+      };
+    };
+
+    const segPrev = evalSeg(prevIdx, bestIdx);
+    const segNext = evalSeg(bestIdx, nextIdx);
+    const seg = segPrev.distSq <= segNext.distSq ? segPrev : segNext;
+
+    const pos = new THREE.Vector3(seg.px, seg.py, seg.pz);
+    const right = seg.a.right.clone().lerp(seg.b.right, seg.alpha).normalize();
+    const tangent = seg.a.tangent.clone().lerp(seg.b.tangent, seg.alpha).normalize();
+    const normal = seg.a.normal.clone().lerp(seg.b.normal, seg.alpha).normalize();
+
+    const distA = seg.a.distance;
+    const distB = seg.b.index === 0 && seg.a.index === SAMPLE_COUNT - 1 ? totalLength : seg.b.distance;
+    const interpDist = (distA + (distB - distA) * seg.alpha) % totalLength;
+
+    const refinedSample: TrackSample = {
+      index: bestIdx,
+      t: interpDist / totalLength,
+      distance: interpDist,
+      position: pos,
+      tangent,
+      right,
+      normal,
+    };
+
+    const relX = x - pos.x;
+    const relZ = z - pos.z;
+    const lateralOffset = relX * right.x + relZ * right.z;
+    const headingAngle = Math.atan2(tangent.x, tangent.z);
 
     return {
-      sample: bestSample,
+      sample: refinedSample,
       lateralOffset,
-      distanceSq: bestDistSq,
+      distanceSq: seg.distSq,
       headingAngle,
     };
   };
@@ -586,6 +642,15 @@ export function createCityCircuit(
     const wrapped = ((distance % totalLength) + totalLength) % totalLength;
     const idx = Math.floor((wrapped / totalLength) * SAMPLE_COUNT) % SAMPLE_COUNT;
     return samples[idx];
+  };
+
+  const getHeightAtDistance = (distance: number): number => {
+    const wrapped = ((distance % totalLength) + totalLength) % totalLength;
+    const exactIdx = (wrapped / totalLength) * SAMPLE_COUNT;
+    const idxA = Math.floor(exactIdx) % SAMPLE_COUNT;
+    const idxB = (idxA + 1) % SAMPLE_COUNT;
+    const frac = exactIdx - Math.floor(exactIdx);
+    return samples[idxA].position.y + (samples[idxB].position.y - samples[idxA].position.y) * frac;
   };
 
   const getMinimapPath = () => {
@@ -613,10 +678,12 @@ export function createCityCircuit(
     totalLength,
     roadHalfWidth: ROAD_HALF_WIDTH,
     barrierHalfWidth: BARRIER_HALF_WIDTH,
+    roadSurfaceOffset: 0.02,
     checkpointDistances,
     group,
     getClosestSample,
     getSampleAtDistance,
+    getHeightAtDistance,
     getMinimapPath,
     dispose: () => {
       cityArch.dispose();

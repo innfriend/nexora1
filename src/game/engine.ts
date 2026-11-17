@@ -209,7 +209,12 @@ export class NexoraRaceEngine {
     wheelSpinAngle: 0,
     chassisPitch: 0,
     chassisRoll: 0,
+    chassisHeave: 0,
+    chassisHeaveVel: 0,
     roadPitch: 0,
+    wheelTravel: [0, 0, 0, 0],
+    wheelVel: [0, 0, 0, 0],
+    prevRoadSlope: 0,
     drifting: false,
     braking: false,
     nitroActive: false,
@@ -641,7 +646,7 @@ export class NexoraRaceEngine {
     const h = this.highwayWorld;
     const p = this.highwayPlayerProxy;
     p.x = h.playerX;
-    p.y = 0;
+    p.y = 0.014;
     p.z = h.playerZ;
     p.heading = h.playerHeading;
     p.vx = h.playerVx;
@@ -651,7 +656,12 @@ export class NexoraRaceEngine {
     p.wheelSpinAngle = h.wheelSpinAngle;
     p.chassisPitch = h.chassisPitch;
     p.chassisRoll = h.chassisRoll;
+    p.chassisHeave = h.chassisHeave;
     p.roadPitch = 0;
+    p.wheelTravel[0] = h.wheelTravel[0];
+    p.wheelTravel[1] = h.wheelTravel[1];
+    p.wheelTravel[2] = h.wheelTravel[2];
+    p.wheelTravel[3] = h.wheelTravel[3];
     p.drifting = h.drifting;
     p.braking = h.braking;
     p.nitroActive = h.nitroActive;
@@ -1142,9 +1152,11 @@ export class NexoraRaceEngine {
       this.actors.forEach((actor) => {
         const aiIn = computeAiInput(actor.state, this.circuit, 'normal');
         stepVehiclePhysics(actor.state, aiIn, this.circuit, dt, 0, TOTAL_RACE_LAPS, false);
+      });
+      resolveVehicleCollisions(this.actors.map((a) => a.state), this.circuit);
+      this.actors.forEach((actor) => {
         this.syncCarTransform(actor.state, actor.mesh);
       });
-      resolveVehicleCollisions(this.actors.map((a) => a.state));
 
       const focus = this.actors.find((a) => a.state.isPlayer) ?? this.actors[0];
       if (focus) {
@@ -1378,8 +1390,6 @@ export class NexoraRaceEngine {
         actor.state.isPlayer && !useAi ? this.slipstreamActive : false,
       );
 
-      this.syncCarTransform(actor.state, actor.mesh);
-
       if (actor.state.isPlayer && this.phase === 'racing') {
         playerStepResult = res;
         if (actor.state.drifting && Math.abs(actor.state.speed) > 10) {
@@ -1389,7 +1399,13 @@ export class NexoraRaceEngine {
       }
     }
 
-    const carImpact = resolveVehicleCollisions(this.actors.map((a) => a.state));
+    const carImpact = resolveVehicleCollisions(
+      this.actors.map((a) => a.state),
+      this.circuit,
+    );
+    for (let i = 0; i < this.actors.length; i++) {
+      this.syncCarTransform(this.actors[i].state, this.actors[i].mesh);
+    }
     const totalImpact = Math.max(playerStepResult.wallImpact, carImpact);
     if (totalImpact > 0.12 && this.phase === 'racing') {
       this.audio.playCollision(totalImpact);
@@ -1954,13 +1970,39 @@ export class NexoraRaceEngine {
     mesh.root.position.set(v.x, v.y, v.z);
     mesh.root.rotation.set(0, v.heading, 0);
     mesh.roadAligned.rotation.set(v.roadPitch, 0, 0);
+    mesh.chassis.position.y = v.chassisHeave;
     mesh.chassis.rotation.set(v.chassisPitch, 0, v.chassisRoll);
 
     mesh.frontLeftSteer.rotation.y = v.steerVisual;
     mesh.frontRightSteer.rotation.y = v.steerVisual;
-    mesh.wheelSpins.forEach((w) => {
-      w.rotation.x = v.wheelSpinAngle;
-    });
+    for (let i = 0; i < mesh.wheelSpins.length; i++) {
+      mesh.wheelSpins[i].rotation.x = v.wheelSpinAngle;
+    }
+
+    // Per-wheel spring compression, coilover squash/extend, and wishbone articulation
+    const suspX = [0.94, -0.94, 0.96, -0.96];
+    const suspZ = [1.42, 1.42, -1.38, -1.38];
+    for (let i = 0; i < 4; i++) {
+      const wheelY = v.wheelTravel[i];
+      const mount = mesh.wheelMounts[i];
+      if (mount) {
+        mount.position.y = 0.36 + wheelY;
+      }
+      const xSign = suspX[i] > 0 ? 1 : -1;
+      const topDeltaY = v.chassisHeave - suspZ[i] * v.chassisPitch + suspX[i] * v.chassisRoll;
+      const coil = mesh.coilSprings[i];
+      if (coil) {
+        const springLen = Math.max(0.14, Math.min(0.38, 0.28 + topDeltaY - wheelY));
+        coil.position.y = 0.64 + topDeltaY;
+        coil.scale.y = springLen / 0.28;
+      }
+      const wishbone = mesh.wishboneArms[i];
+      if (wishbone) {
+        const innerDelta = topDeltaY * 0.65;
+        wishbone.position.y = 0.32 + innerDelta;
+        wishbone.rotation.z = xSign * Math.atan2(wheelY - innerDelta, 0.36);
+      }
+    }
 
     mesh.brakeLightMat.emissiveIntensity = v.braking ? 3.5 : 0.9;
     mesh.brakeHaloMat.opacity = v.braking ? 0.78 : 0.22;
@@ -2350,7 +2392,14 @@ export class NexoraRaceEngine {
       actor.state.wheelSpinAngle = snap.wheelSpinAngle;
       actor.state.chassisPitch = snap.chassisPitch;
       actor.state.chassisRoll = snap.chassisRoll;
+      actor.state.chassisHeave = snap.chassisHeave ?? 0;
       actor.state.roadPitch = snap.roadPitch;
+      if (snap.wheelTravel) {
+        actor.state.wheelTravel[0] = snap.wheelTravel[0];
+        actor.state.wheelTravel[1] = snap.wheelTravel[1];
+        actor.state.wheelTravel[2] = snap.wheelTravel[2];
+        actor.state.wheelTravel[3] = snap.wheelTravel[3];
+      }
       actor.state.braking = snap.braking;
       actor.state.drifting = snap.drifting;
       actor.state.nitroActive = Boolean(snap.id === 'player' && sampled.playerInput.nitro);

@@ -1,5 +1,9 @@
-import { CityCircuit } from './track';
+import { CityCircuit, TrackProjection } from './track';
 import { Difficulty, EffectiveCarSpecs, InputState } from './types';
+
+const CAR_HALF_WIDTH = 1.24;
+const CAR_HALF_LENGTH = 2.44;
+const BARRIER_MARGIN = 0.14;
 
 export interface VehicleState {
   id: string;
@@ -17,7 +21,12 @@ export interface VehicleState {
   wheelSpinAngle: number;
   chassisPitch: number;
   chassisRoll: number;
+  chassisHeave: number;
+  chassisHeaveVel: number;
   roadPitch: number;
+  wheelTravel: [number, number, number, number];
+  wheelVel: [number, number, number, number];
+  prevRoadSlope: number;
   braking: boolean;
   drifting: boolean;
   nitroActive: boolean;
@@ -64,13 +73,17 @@ export function createVehicleOnGrid(
   const sample = circuit.getSampleAtDistance(startDist);
   const heading = Math.atan2(sample.tangent.x, sample.tangent.z);
 
+  const frontY = circuit.getHeightAtDistance(startDist + 1.42) + circuit.roadSurfaceOffset + 0.004;
+  const rearY = circuit.getHeightAtDistance(startDist - 1.38) + circuit.roadSurfaceOffset + 0.004;
+  const centerY = sample.position.y + circuit.roadSurfaceOffset + 0.004;
+
   return {
     id,
     name,
     isPlayer,
     color,
     x: sample.position.x + sample.right.x * col,
-    y: sample.position.y,
+    y: Math.max(centerY, (frontY + rearY) * 0.5),
     z: sample.position.z + sample.right.z * col,
     vx: 0,
     vz: 0,
@@ -80,7 +93,12 @@ export function createVehicleOnGrid(
     wheelSpinAngle: 0,
     chassisPitch: 0,
     chassisRoll: 0,
-    roadPitch: -Math.asin(Math.max(-0.5, Math.min(0.5, sample.tangent.y))),
+    chassisHeave: 0,
+    chassisHeaveVel: 0,
+    roadPitch: Math.atan2(rearY - frontY, 2.8),
+    wheelTravel: [0, 0, 0, 0],
+    wheelVel: [0, 0, 0, 0],
+    prevRoadSlope: sample.tangent.y,
     braking: false,
     drifting: false,
     nitroActive: false,
@@ -98,6 +116,31 @@ export function createVehicleOnGrid(
     aiLaneOffset,
     aiSpeedSkill,
   };
+}
+
+function updateVehicleGroundContact(
+  v: VehicleState,
+  circuit: CityCircuit,
+  proj: TrackProjection,
+): void {
+  const fwdX = Math.sin(v.heading);
+  const fwdZ = Math.cos(v.heading);
+  const fwdDotTan = fwdX * proj.sample.tangent.x + fwdZ * proj.sample.tangent.z;
+
+  // Raise slightly when tires ride onto raised outer rumble curbs (curb rises +0.03m over asphalt)
+  const edgeDist = Math.abs(v.lateralOffset) + 1.1;
+  const curbLift =
+    edgeDist > circuit.roadHalfWidth
+      ? Math.min(0.03, ((edgeDist - circuit.roadHalfWidth) / 0.8) * 0.03)
+      : 0;
+  const clearance = circuit.roadSurfaceOffset + curbLift + 0.005;
+
+  const yFront = circuit.getHeightAtDistance(proj.sample.distance + 1.42 * fwdDotTan) + clearance;
+  const yRear = circuit.getHeightAtDistance(proj.sample.distance - 1.38 * fwdDotTan) + clearance;
+  const yCenter = proj.sample.position.y + clearance;
+
+  v.y = Math.max(yCenter, (yFront + yRear) * 0.5);
+  v.roadPitch = Math.atan2(yRear - yFront, 2.8);
 }
 
 export function computeAiInput(
@@ -244,56 +287,117 @@ export function stepVehiclePhysics(
   const proj = circuit.getClosestSample(v.x, v.y, v.z, v.trackSampleIndex);
   v.trackSampleIndex = proj.sample.index;
   v.trackDistance = proj.sample.distance;
-  v.y += (proj.sample.position.y - v.y) * Math.min(1, dt * 24);
 
-  // Road pitch angle for visual slope alignment
-  const targetRoadPitch = -Math.asin(Math.max(-0.45, Math.min(0.45, proj.sample.tangent.y)));
-  v.roadPitch += (targetRoadPitch - v.roadPitch) * Math.min(1, dt * 12);
+  // Track barrier collision response (full rotated car OBB so corners & wheels never clip wall)
+  const { wallImpact, proj: clampedProj } = clampVehicleToCircuitBarrier(v, circuit, proj);
 
-  // Track barrier collision response
-  let wallImpact = 0;
-  const safeHalfWidth = circuit.barrierHalfWidth - 1.15;
-  let lat = proj.lateralOffset;
-
-  if (Math.abs(lat) > safeHalfWidth) {
-    const sign = Math.sign(lat);
-    const excess = Math.abs(lat) - safeHalfWidth;
-    // Push car cleanly inside barrier
-    v.x -= proj.sample.right.x * sign * excess;
-    v.z -= proj.sample.right.z * sign * excess;
-    lat = sign * safeHalfWidth;
-
-    // Reflect velocity moving outward into the barrier
-    const outwardVel = v.vx * (proj.sample.right.x * sign) + v.vz * (proj.sample.right.z * sign);
-    if (outwardVel > 0) {
-      wallImpact = Math.min(1, outwardVel / 18);
-      v.vx -= proj.sample.right.x * sign * outwardVel * 1.32;
-      v.vz -= proj.sample.right.z * sign * outwardVel * 1.32;
-      // Friction scrub on barrier graze
-      v.vx *= 0.86;
-      v.vz *= 0.86;
-    }
-  }
-  v.lateralOffset = lat;
+  // Exact dual-axle ground contact so front/rear tires never sink into ramps, crests, or asphalt
+  updateVehicleGroundContact(v, circuit, clampedProj);
 
   // Recompute post-collision forward speed
-  v.speed = v.vx * nFwdX + v.vz * nFwdZ;
+  v.speed = v.vx * Math.sin(v.heading) + v.vz * Math.cos(v.heading);
   v.braking = braking;
-
-  // Visual suspension lean (pitch on throttle/nitro/brake, roll on steer/lateral)
-  const targetPitch = input.brake
-    ? 0.042
-    : v.nitroActive
-      ? -0.045
-      : input.accelerate
-        ? -0.025
-        : 0;
-  const targetRoll = -steerInput * Math.min(1, speedAbs / 24) * 0.055;
-  v.chassisPitch += (targetPitch - v.chassisPitch) * Math.min(1, dt * 10);
-  v.chassisRoll += (targetRoll - v.chassisRoll) * Math.min(1, dt * 10);
 
   // Wheel rotation
   v.wheelSpinAngle += (v.speed / 0.35) * dt;
+
+  // Per-wheel spring-damper compression over road seams, rumble curbs, and ramp transitions
+  const bumpPhaseSpeed = Math.min(1, speedAbs / 8);
+  const fwdDotTan = Math.sin(v.heading) * clampedProj.sample.tangent.x + Math.cos(v.heading) * clampedProj.sample.tangent.z;
+  const rightDotSide = Math.cos(v.heading) * clampedProj.sample.right.x - Math.sin(v.heading) * clampedProj.sample.right.z;
+  const onOverpass = clampedProj.sample.position.y > 0.45;
+  const distFront = clampedProj.sample.distance + 1.42 * fwdDotTan;
+  const distRear = clampedProj.sample.distance - 1.38 * fwdDotTan;
+
+  // Ramp vertical curvature G-load (compresses chassis entering ramps, unloads over crests)
+  const slopeRate = (clampedProj.sample.tangent.y - v.prevRoadSlope) / Math.max(0.008, dt);
+  v.prevRoadSlope = clampedProj.sample.tangent.y;
+  const slopeCompression = Math.max(-1.6, Math.min(1.6, slopeRate * v.speed * 0.045));
+
+  const sampleWheelBump = (axleDist: number, sideSign: 1 | -1): number => {
+    if (speedAbs < 1.2) return 0;
+    // Bridge expansion joints every 22m (sharper on overpass) + subtle micro-asphalt chatter
+    const jointPhase = ((axleDist % 22) + 22) % 22;
+    const jointSpike =
+      jointPhase < 0.85
+        ? Math.sin((jointPhase / 0.85) * Math.PI) * (onOverpass ? 0.046 : 0.026)
+        : 0;
+    const asphaltRipple =
+      Math.max(
+        0,
+        Math.sin(axleDist * 1.15 + sideSign * 0.7) * 0.006 +
+          Math.sin(axleDist * 2.85 + sideSign * 1.4) * 0.004,
+      ) * bumpPhaseSpeed;
+
+    // Independent left/right serrated rumble curb detection
+    const wheelLat = v.lateralOffset - rightDotSide * sideSign * 0.95;
+    let curbBump = 0;
+    if (Math.abs(wheelLat) > circuit.roadHalfWidth - 0.15) {
+      const curbDepth = Math.min(1, (Math.abs(wheelLat) - (circuit.roadHalfWidth - 0.15)) / 0.65);
+      const serration = 0.5 + 0.5 * Math.sin(axleDist * 6.8);
+      curbBump = (0.014 + serration * 0.032) * curbDepth * bumpPhaseSpeed;
+    }
+
+    return Math.min(0.085, jointSpike * bumpPhaseSpeed + asphaltRipple + curbBump);
+  };
+
+  const targetBumps: [number, number, number, number] = [
+    sampleWheelBump(distFront, 1), // FL (+x, +z)
+    sampleWheelBump(distFront, -1), // FR (-x, +z)
+    sampleWheelBump(distRear, 1), // RL (+x, -z)
+    sampleWheelBump(distRear, -1), // RR (-x, -z)
+  ];
+
+  // Sub-stepped 2nd-order coilover spring-damper ODE (k = 240, c = 21)
+  const subDt = dt * 0.5;
+  const kWheel = 240;
+  const cWheel = 21;
+  for (let w = 0; w < 4; w++) {
+    let pos = v.wheelTravel[w];
+    let vel = v.wheelVel[w];
+    const target = targetBumps[w];
+    for (let s = 0; s < 2; s++) {
+      const accel = (target - pos) * kWheel - vel * cWheel;
+      vel += accel * subDt;
+      pos += vel * subDt;
+    }
+    if (pos < 0) {
+      pos = 0;
+      if (vel < 0) vel *= -0.2;
+    } else if (pos > 0.09) {
+      pos = 0.09;
+      if (vel > 0) vel = 0;
+    }
+    v.wheelTravel[w] = pos;
+    v.wheelVel[w] = vel;
+  }
+
+  // Sprung chassis heave reacting to average wheel compression + ramp G-load + impact jolt
+  const avgWheelBump =
+    (v.wheelTravel[0] + v.wheelTravel[1] + v.wheelTravel[2] + v.wheelTravel[3]) * 0.25;
+  const targetHeave =
+    avgWheelBump * 0.35 -
+    slopeCompression * 0.025 -
+    (v.nitroActive ? 0.012 : 0) -
+    wallImpact * 0.03;
+  const heaveAccel = (targetHeave - v.chassisHeave) * 145 - v.chassisHeaveVel * 14;
+  v.chassisHeaveVel += heaveAccel * dt;
+  v.chassisHeave = Math.max(-0.058, Math.min(0.038, v.chassisHeave + v.chassisHeaveVel * dt));
+
+  // Visual suspension lean (pitch on throttle/nitro/brake + front-rear bump kick, roll on steer + curb tilt)
+  const frontBumpAvg = (v.wheelTravel[0] + v.wheelTravel[1]) * 0.5;
+  const rearBumpAvg = (v.wheelTravel[2] + v.wheelTravel[3]) * 0.5;
+  const leftBumpAvg = (v.wheelTravel[0] + v.wheelTravel[2]) * 0.5;
+  const rightBumpAvg = (v.wheelTravel[1] + v.wheelTravel[3]) * 0.5;
+  const bumpPitchKick = (rearBumpAvg - frontBumpAvg) * 0.22;
+  const bumpRollKick = (rightBumpAvg - leftBumpAvg) * 0.18;
+
+  const targetPitch =
+    (input.brake ? 0.044 : v.nitroActive ? -0.048 : input.accelerate ? -0.026 : 0) +
+    bumpPitchKick;
+  const targetRoll = -steerInput * Math.min(1, speedAbs / 24) * 0.058 + bumpRollKick;
+  v.chassisPitch += (targetPitch - v.chassisPitch) * Math.min(1, dt * 11);
+  v.chassisRoll += (targetRoll - v.chassisRoll) * Math.min(1, dt * 11);
 
   // Drift / skid intensity
   const lateralSlip = Math.abs(lateralVel);
@@ -370,7 +474,77 @@ export function stepVehiclePhysics(
   };
 }
 
-export function resolveVehicleCollisions(vehicles: VehicleState[]): number {
+export function clampVehicleToCircuitBarrier(
+  v: VehicleState,
+  circuit: CityCircuit,
+  projInput?: TrackProjection,
+): { wallImpact: number; proj: TrackProjection } {
+  const proj = projInput ?? circuit.getClosestSample(v.x, v.y, v.z, v.trackSampleIndex);
+  v.trackSampleIndex = proj.sample.index;
+  v.trackDistance = proj.sample.distance;
+
+  const fwdX = Math.sin(v.heading);
+  const fwdZ = Math.cos(v.heading);
+  const rightX = -Math.cos(v.heading);
+  const rightZ = Math.sin(v.heading);
+
+  const lateralExtent =
+    Math.abs(fwdX * proj.sample.right.x + fwdZ * proj.sample.right.z) * CAR_HALF_LENGTH +
+    Math.abs(rightX * proj.sample.right.x + rightZ * proj.sample.right.z) * CAR_HALF_WIDTH;
+
+  const safeHalfWidth = Math.max(1.2, circuit.barrierHalfWidth - lateralExtent - BARRIER_MARGIN);
+  let lat = proj.lateralOffset;
+  let wallImpact = 0;
+
+  if (Math.abs(lat) > safeHalfWidth) {
+    const sign = Math.sign(lat);
+    const excess = Math.abs(lat) - safeHalfWidth;
+    v.x -= proj.sample.right.x * sign * excess;
+    v.z -= proj.sample.right.z * sign * excess;
+    lat = sign * safeHalfWidth;
+
+    const outwardVel = v.vx * (proj.sample.right.x * sign) + v.vz * (proj.sample.right.z * sign);
+    if (outwardVel > 0) {
+      wallImpact = Math.min(1, outwardVel / 18);
+      v.vx -= proj.sample.right.x * sign * outwardVel * 1.32;
+      v.vz -= proj.sample.right.z * sign * outwardVel * 1.32;
+      v.vx *= 0.86;
+      v.vz *= 0.86;
+    }
+
+    // Smoothly deflect nose back toward track direction if angled into barrier
+    const noseOutwardDot = fwdX * (proj.sample.right.x * sign) + fwdZ * (proj.sample.right.z * sign);
+    if (noseOutwardDot > 0.04) {
+      const trackTanYaw = Math.atan2(proj.sample.tangent.x, proj.sample.tangent.z);
+      const fwdDotTan = fwdX * proj.sample.tangent.x + fwdZ * proj.sample.tangent.z;
+      const targetYaw = fwdDotTan >= 0 ? trackTanYaw : trackTanYaw + Math.PI;
+      let yawDiff = targetYaw - v.heading;
+      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      v.heading += Math.sign(yawDiff) * Math.min(Math.abs(yawDiff), noseOutwardDot * 0.24);
+
+      const nfX = Math.sin(v.heading);
+      const nfZ = Math.cos(v.heading);
+      const nrX = -Math.cos(v.heading);
+      const nrZ = Math.sin(v.heading);
+      const nextExtent =
+        Math.abs(nfX * proj.sample.right.x + nfZ * proj.sample.right.z) * CAR_HALF_LENGTH +
+        Math.abs(nrX * proj.sample.right.x + nrZ * proj.sample.right.z) * CAR_HALF_WIDTH;
+      const nextSafe = Math.max(1.2, circuit.barrierHalfWidth - nextExtent - BARRIER_MARGIN);
+      if (Math.abs(lat) > nextSafe) {
+        const fixExcess = Math.abs(lat) - nextSafe;
+        v.x -= proj.sample.right.x * sign * fixExcess;
+        v.z -= proj.sample.right.z * sign * fixExcess;
+        lat = sign * nextSafe;
+      }
+    }
+  }
+
+  v.lateralOffset = lat;
+  return { wallImpact, proj };
+}
+
+export function resolveVehicleCollisions(vehicles: VehicleState[], circuit?: CityCircuit): number {
   let maxImpact = 0;
   const minDist = 2.65;
   const minDistSq = minDist * minDist;
@@ -412,5 +586,19 @@ export function resolveVehicleCollisions(vehicles: VehicleState[]): number {
       }
     }
   }
+
+  // Re-enforce barrier clamping & ground contact so car-to-car bumps never push a car out of bounds or below road
+  if (circuit) {
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
+      const { wallImpact, proj } = clampVehicleToCircuitBarrier(v, circuit);
+      updateVehicleGroundContact(v, circuit, proj);
+      if (v.isPlayer && wallImpact > maxImpact) {
+        maxImpact = wallImpact;
+      }
+      v.speed = v.vx * Math.sin(v.heading) + v.vz * Math.cos(v.heading);
+    }
+  }
+
   return maxImpact;
 }

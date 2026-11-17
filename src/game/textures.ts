@@ -14,6 +14,10 @@ export interface ProceduralTextureSet {
   buildingEmissives: THREE.CanvasTexture[];
   buildingPodium: THREE.CanvasTexture;
   urbanGround: THREE.CanvasTexture;
+  treeBark: THREE.CanvasTexture;
+  treeBarkBump: THREE.CanvasTexture;
+  treeLeafCluster: THREE.CanvasTexture;
+  planterSoil: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
   smokePuff: THREE.CanvasTexture;
   headlightBeam: THREE.CanvasTexture;
@@ -559,6 +563,224 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   }
   const grilleMesh = configureColorTexture(new THREE.CanvasTexture(gCanvas), anisotropy, 8, 2);
 
+  // 15. Organic Furrowed Tree Bark (Albedo + Linear Bump Map)
+  const barkCanvas = document.createElement('canvas');
+  barkCanvas.width = 256;
+  barkCanvas.height = 256;
+  const bkCtx = barkCanvas.getContext('2d')!;
+  bkCtx.fillStyle = '#33261E';
+  bkCtx.fillRect(0, 0, 256, 256);
+
+  const barkBumpCanvas = document.createElement('canvas');
+  barkBumpCanvas.width = 256;
+  barkBumpCanvas.height = 256;
+  const bbCtx = barkBumpCanvas.getContext('2d')!;
+  bbCtx.fillStyle = '#808080';
+  bbCtx.fillRect(0, 0, 256, 256);
+
+  // Deterministic pseudo-random helper for repeatable organic bark grain
+  let seed = 1337;
+  const rand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return (seed - 1) / 2147483646;
+  };
+
+  // Vertical sinuous bark ridges & deep dark fissures
+  for (let i = 0; i < 140; i++) {
+    const baseX = rand() * 256;
+    const width = 2 + rand() * 6;
+    const isCrevice = rand() < 0.45;
+    bkCtx.strokeStyle = isCrevice
+      ? `rgba(18, 12, 9, ${0.42 + rand() * 0.42})`
+      : `rgba(${68 + Math.floor(rand() * 24)}, ${53 + Math.floor(rand() * 18)}, ${42 + Math.floor(rand() * 14)}, ${0.28 + rand() * 0.35})`;
+    bbCtx.strokeStyle = isCrevice
+      ? `rgba(24, 24, 24, ${0.55 + rand() * 0.35})`
+      : `rgba(218, 218, 218, ${0.35 + rand() * 0.4})`;
+    bkCtx.lineWidth = width;
+    bbCtx.lineWidth = width;
+
+    const drawRidge = (offsetX: number) => {
+      bkCtx.beginPath();
+      bbCtx.beginPath();
+      let cx = baseX + offsetX;
+      bkCtx.moveTo(cx, 0);
+      bbCtx.moveTo(cx, 0);
+      for (let y = 16; y <= 256; y += 16) {
+        cx += (rand() - 0.5) * 6;
+        bkCtx.lineTo(cx, y);
+        bbCtx.lineTo(cx, y);
+      }
+      bkCtx.stroke();
+      bbCtx.stroke();
+    };
+    drawRidge(0);
+    if (baseX < 18) drawRidge(256);
+    if (baseX > 238) drawRidge(-256);
+  }
+
+  // Subtle weathered bark speckles & faint urban moss/lichen flecks
+  for (let i = 0; i < 650; i++) {
+    const x = rand() * 256;
+    const y = rand() * 256;
+    const w = 1 + rand() * 3;
+    const h = 2 + rand() * 8;
+    if (rand() < 0.16) {
+      bkCtx.fillStyle = `rgba(48, 66, 40, ${0.18 + rand() * 0.22})`;
+    } else {
+      const v = 25 + Math.floor(rand() * 48);
+      bkCtx.fillStyle = `rgba(${v + 16}, ${v + 8}, ${v}, 0.24)`;
+    }
+    bkCtx.fillRect(x, y, w, h);
+    const bv = 55 + Math.floor(rand() * 145);
+    bbCtx.fillStyle = `rgba(${bv}, ${bv}, ${bv}, 0.25)`;
+    bbCtx.fillRect(x, y, w, h);
+  }
+  const treeBark = configureColorTexture(new THREE.CanvasTexture(barkCanvas), anisotropy, 2, 3);
+  const treeBarkBump = configureColorTexture(
+    new THREE.CanvasTexture(barkBumpCanvas),
+    anisotropy,
+    2,
+    3,
+    true,
+  );
+
+  // 16. Botanical Leaf-Cluster Alpha-Cutout Sprig (512x512 crisp overlapping foliage)
+  const leafCanvas = document.createElement('canvas');
+  leafCanvas.width = 512;
+  leafCanvas.height = 512;
+  const lCtx = leafCanvas.getContext('2d')!;
+  lCtx.clearRect(0, 0, 512, 512);
+
+  // Fine branching woody twigs radiating from center-base into the cluster
+  const twigBranches: Array<[number, number, number, number, number]> = [
+    [256, 468, 256, 250, 7],
+    [256, 360, 145, 210, 4.5],
+    [256, 340, 372, 200, 4.5],
+    [256, 270, 185, 118, 3.5],
+    [256, 260, 336, 112, 3.5],
+    [188, 266, 98, 295, 3],
+    [324, 256, 418, 290, 3],
+    [256, 215, 256, 86, 3],
+  ];
+  lCtx.lineCap = 'round';
+  twigBranches.forEach(([x0, y0, x1, y1, lw]) => {
+    lCtx.strokeStyle = '#36281F';
+    lCtx.lineWidth = lw;
+    lCtx.beginPath();
+    lCtx.moveTo(x0, y0);
+    lCtx.quadraticCurveTo((x0 + x1) * 0.5 + (rand() - 0.5) * 28, (y0 + y1) * 0.5, x1, y1);
+    lCtx.stroke();
+  });
+
+  const drawBotanicalLeaf = (
+    cx: number,
+    cy: number,
+    angle: number,
+    length: number,
+    width: number,
+    baseHex: string,
+    tipHex: string,
+    veinColor: string,
+  ) => {
+    lCtx.save();
+    lCtx.translate(cx, cy);
+    lCtx.rotate(angle);
+
+    const leafGrad = lCtx.createLinearGradient(0, 0, length, 0);
+    leafGrad.addColorStop(0, baseHex);
+    leafGrad.addColorStop(0.6, tipHex);
+    leafGrad.addColorStop(1, tipHex);
+
+    lCtx.fillStyle = leafGrad;
+    lCtx.beginPath();
+    lCtx.moveTo(0, 0);
+    lCtx.bezierCurveTo(length * 0.28, -width * 0.9, length * 0.72, -width * 0.55, length, 0);
+    lCtx.bezierCurveTo(length * 0.72, width * 0.55, length * 0.28, width * 0.9, 0, 0);
+    lCtx.closePath();
+    lCtx.fill();
+
+    // Crisp darker organic leaf rim & central midrib vein
+    lCtx.strokeStyle = 'rgba(10, 22, 13, 0.45)';
+    lCtx.lineWidth = 1.2;
+    lCtx.stroke();
+
+    lCtx.strokeStyle = veinColor;
+    lCtx.lineWidth = 1.15;
+    lCtx.beginPath();
+    lCtx.moveTo(2, 0);
+    lCtx.lineTo(length * 0.86, 0);
+    lCtx.stroke();
+
+    lCtx.restore();
+  };
+
+  // Layer 1 (back / shadowed inner leaves) -> Layer 3 (outer sunlit leaf tips)
+  const leafPalettes: Array<[string, string, string]> = [
+    ['#15301F', '#20482E', 'rgba(72, 128, 82, 0.42)'],
+    ['#1A3D26', '#2C5F3B', 'rgba(92, 148, 96, 0.48)'],
+    ['#214A2E', '#366F43', 'rgba(116, 170, 110, 0.52)'],
+    ['#295734', '#437D4C', 'rgba(134, 186, 122, 0.56)'],
+  ];
+
+  // Generate ~125 natural overlapping leaves clustered along twigs & organic silhouette lobes
+  for (let layer = 0; layer < 3; layer++) {
+    const count = layer === 0 ? 44 : layer === 1 ? 46 : 36;
+    for (let i = 0; i < count; i++) {
+      const t = rand();
+      const ang = rand() * Math.PI * 2;
+      const maxRad = layer === 0 ? 155 : layer === 1 ? 186 : 206;
+      const rad = (0.12 + Math.pow(t, 0.72) * 0.88) * maxRad;
+      // Slight upward-oval clustering to form natural frond lobes
+      const lx = 256 + Math.cos(ang) * rad * 0.98;
+      const ly = 256 + Math.sin(ang) * rad * 0.92 - 10;
+      const leafAngle = ang + (rand() - 0.5) * 0.95;
+      const leafLen = (32 + rand() * 34) * (layer === 2 ? 0.92 : 1.04);
+      const leafW = leafLen * (0.34 + rand() * 0.14);
+      const palIdx =
+        layer === 0 ? Math.floor(rand() * 2) : layer === 1 ? 1 + Math.floor(rand() * 2) : 2 + Math.floor(rand() * 2);
+      const [bHex, tHex, vCol] = leafPalettes[palIdx];
+      drawBotanicalLeaf(lx, ly, leafAngle, leafLen, leafW, bHex, tHex, vCol);
+    }
+  }
+
+  const treeLeafCluster = new THREE.CanvasTexture(leafCanvas);
+  treeLeafCluster.colorSpace = THREE.SRGBColorSpace;
+  treeLeafCluster.anisotropy = anisotropy;
+  treeLeafCluster.wrapS = THREE.ClampToEdgeWrapping;
+  treeLeafCluster.wrapT = THREE.ClampToEdgeWrapping;
+  treeLeafCluster.needsUpdate = true;
+
+  // 17. Urban Planter Dark Mulch Soil + Decorative Cast-Iron Tree Grate
+  const soilCanvas = document.createElement('canvas');
+  soilCanvas.width = 256;
+  soilCanvas.height = 256;
+  const slCtx = soilCanvas.getContext('2d')!;
+  slCtx.fillStyle = '#1B1410';
+  slCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 1400; i++) {
+    const shade = 20 + Math.floor(rand() * 28);
+    slCtx.fillStyle = `rgb(${shade + 12}, ${shade + 5}, ${shade})`;
+    slCtx.fillRect(rand() * 256, rand() * 256, 2 + rand() * 4, 2 + rand() * 3);
+  }
+  // Radial cast-iron architectural tree grate bars & concentric rings
+  slCtx.strokeStyle = '#27303F';
+  slCtx.lineWidth = 5;
+  slCtx.strokeRect(8, 8, 240, 240);
+  slCtx.lineWidth = 3;
+  [44, 78, 108].forEach((r) => {
+    slCtx.beginPath();
+    slCtx.arc(128, 128, r, 0, Math.PI * 2);
+    slCtx.stroke();
+  });
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2;
+    slCtx.beginPath();
+    slCtx.moveTo(128 + Math.cos(a) * 34, 128 + Math.sin(a) * 34);
+    slCtx.lineTo(128 + Math.cos(a) * 116, 128 + Math.sin(a) * 116);
+    slCtx.stroke();
+  }
+  const planterSoil = configureColorTexture(new THREE.CanvasTexture(soilCanvas), anisotropy, 1, 1);
+
   return {
     asphalt,
     asphaltRoughness,
@@ -573,6 +795,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     buildingEmissives,
     buildingPodium,
     urbanGround,
+    treeBark,
+    treeBarkBump,
+    treeLeafCluster,
+    planterSoil,
     contactShadow,
     smokePuff,
     headlightBeam,
@@ -592,6 +818,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
       buildingEmissives.forEach((e) => e.dispose());
       buildingPodium.dispose();
       urbanGround.dispose();
+      treeBark.dispose();
+      treeBarkBump.dispose();
+      treeLeafCluster.dispose();
+      planterSoil.dispose();
       contactShadow.dispose();
       smokePuff.dispose();
       headlightBeam.dispose();

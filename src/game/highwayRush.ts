@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { ProceduralTextureSet } from './textures';
 import { createTrafficVehicleMesh, TrafficMeshHandles, TrafficVehicleKind } from './trafficModel';
+import { createUrbanTreeAssets, UrbanTreeAssetBundle } from './treeModel';
 import { EffectiveCarSpecs, InputState } from './types';
 
 export const HIGHWAY_LANE_CENTERS = [-5.4, -1.8, 1.8, 5.4];
@@ -49,6 +50,7 @@ export class HighwayRushWorld {
   private geometries: THREE.BufferGeometry[] = [];
   private materials: THREE.Material[] = [];
   private localTextures: THREE.Texture[] = [];
+  private treeAssets: UrbanTreeAssetBundle | null = null;
 
   private chunks: HighwayChunk[] = [];
   private traffic: TrafficActor[] = [];
@@ -63,6 +65,10 @@ export class HighwayRushWorld {
   public wheelSpinAngle = 0;
   public chassisPitch = 0;
   public chassisRoll = 0;
+  public chassisHeave = 0;
+  private chassisHeaveVel = 0;
+  public wheelTravel: [number, number, number, number] = [0, 0, 0, 0];
+  private wheelVel: [number, number, number, number] = [0, 0, 0, 0];
   public braking = false;
   public drifting = false;
 
@@ -256,6 +262,15 @@ export class HighwayRushWorld {
     const octBldgGeo = this.trackGeo(new THREE.CylinderGeometry(0.6, 0.64, 1, 8, 1));
     octBldgGeo.rotateY(Math.PI / 8);
     const spireGeo = this.trackGeo(new THREE.CylinderGeometry(0.06, 0.32, 1, 6));
+    const treeAssets = createUrbanTreeAssets(textures);
+    this.treeAssets = treeAssets;
+    const canopyDepthMat = this.trackMat(
+      new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        map: textures.treeLeafCluster,
+        alphaTest: 0.4,
+      }),
+    );
 
     for (let i = 0; i < CHUNK_COUNT; i++) {
       const chunkGroup = new THREE.Group();
@@ -309,6 +324,43 @@ export class HighwayRushWorld {
         strip.position.set(0, 7.1, 0);
         chunkGroup.add(strip);
       }
+
+      // Urban boulevard shade trees in precast planters flanking the expressway shoulders
+      [-1, 1].forEach((side, sIdx) => {
+        const tx = side * (ROAD_WIDTH * 0.5 + 3.25);
+        const tz = side > 0 ? -11 : 11;
+        const variantIdx = (i + sIdx) % 2 === 0 ? 0 : 1;
+        const variant = treeAssets.variants[variantIdx];
+        const tScale = 0.92 + ((i * 3 + sIdx) % 4) * 0.08;
+        const yaw = i * 1.45 + sIdx * 2.1;
+
+        const planter = new THREE.Mesh(treeAssets.planterGeo, treeAssets.planterMat);
+        planter.position.set(tx, -0.1, tz);
+        planter.receiveShadow = true;
+        chunkGroup.add(planter);
+
+        const soil = new THREE.Mesh(treeAssets.soilGeo, treeAssets.soilMat);
+        soil.position.set(tx, 0.35, tz);
+        soil.receiveShadow = true;
+        chunkGroup.add(soil);
+
+        const bark = new THREE.Mesh(variant.barkGeo, treeAssets.barkMat);
+        bark.position.set(tx, 0, tz);
+        bark.rotation.set(0, yaw, 0);
+        bark.scale.set(tScale, tScale, tScale);
+        bark.castShadow = true;
+        bark.receiveShadow = true;
+        chunkGroup.add(bark);
+
+        const canopy = new THREE.Mesh(variant.canopyGeo, treeAssets.canopyMat);
+        canopy.position.set(tx, 0, tz);
+        canopy.rotation.set(0, yaw, 0);
+        canopy.scale.set(tScale, tScale, tScale);
+        canopy.castShadow = true;
+        canopy.receiveShadow = true;
+        canopy.customDepthMaterial = canopyDepthMat;
+        chunkGroup.add(canopy);
+      });
 
       // Flanking composite architectural skyline towers along both sides of the expressway
       [-1, 1].forEach((side, sIdx) => {
@@ -409,6 +461,10 @@ export class HighwayRushWorld {
     this.wheelSpinAngle = 0;
     this.chassisPitch = 0;
     this.chassisRoll = 0;
+    this.chassisHeave = 0;
+    this.chassisHeaveVel = 0;
+    this.wheelTravel = [0, 0, 0, 0];
+    this.wheelVel = [0, 0, 0, 0];
     this.braking = false;
     this.drifting = false;
 
@@ -440,7 +496,7 @@ export class HighwayRushWorld {
       t.z = (oncoming ? 140 : 75) + idx * 26 + (idx % 3) * 8;
       t.speedMs = oncoming ? -(16 + (idx % 4) * 2.4) : 22 + (idx % 4) * 3.0;
       t.nearMissed = false;
-      t.mesh.root.position.set(t.x, 0, t.z);
+      t.mesh.root.position.set(t.x, 0.014, t.z);
       t.mesh.root.rotation.y = oncoming ? Math.PI : 0;
     });
   }
@@ -588,33 +644,89 @@ export class HighwayRushWorld {
     this.playerX += this.playerVx * dt;
     this.playerZ += this.playerSpeed * dt;
 
-    // Barrier clamp with gentle rebound
-    if (Math.abs(this.playerX) > BARRIER_LIMIT_X) {
-      const sign = Math.sign(this.playerX);
-      wallImpact = Math.min(1, Math.abs(this.playerVx) / 11);
-      this.playerX = sign * BARRIER_LIMIT_X;
-      this.playerVx = -sign * Math.abs(this.playerVx) * 0.35;
-      this.playerSpeed = Math.max(minCruise, this.playerSpeed * 0.94);
-    }
-
-    // Visual chassis dynamics
+    // Update heading before clamping so rotated car footprint never clips side barriers
     const targetHeading = Math.max(
       -0.28,
       Math.min(0.28, (this.playerVx / Math.max(20, this.playerSpeed)) * 1.15),
     );
     this.playerHeading += (targetHeading - this.playerHeading) * Math.min(1, dt * 12);
+
+    const latExtent =
+      Math.abs(Math.sin(this.playerHeading)) * 2.44 +
+      Math.abs(Math.cos(this.playerHeading)) * 1.24;
+    const safeLimitX = Math.min(BARRIER_LIMIT_X, ROAD_WIDTH * 0.5 - latExtent - 0.14);
+
+    // Barrier clamp with gentle rebound & deflection
+    if (Math.abs(this.playerX) > safeLimitX) {
+      const sign = Math.sign(this.playerX);
+      wallImpact = Math.min(1, Math.abs(this.playerVx) / 11);
+      this.playerX = sign * safeLimitX;
+      this.playerVx = -sign * Math.abs(this.playerVx) * 0.35;
+      this.playerSpeed = Math.max(minCruise, this.playerSpeed * 0.94);
+      if (this.playerHeading * sign > 0) {
+        this.playerHeading *= 0.4;
+      }
+    }
+
+    // Visual chassis & 4-wheel coilover spring-damper dynamics
     this.steerVisual += (steerInput * 0.38 - this.steerVisual) * Math.min(1, dt * 14);
     this.wheelSpinAngle += (this.playerSpeed / 0.36) * dt;
-    const targetPitch = this.braking
-      ? 0.036
-      : this.nitroActive
-        ? -0.045
-        : input.accelerate
-          ? -0.025
-          : 0;
-    const targetRoll = -steerInput * 0.055;
-    this.chassisPitch += (targetPitch - this.chassisPitch) * Math.min(1, dt * 10);
-    this.chassisRoll += (targetRoll - this.chassisRoll) * Math.min(1, dt * 10);
+
+    const hwyBumpScale = Math.min(1, this.playerSpeed / 12);
+    const sampleHwyBump = (zPos: number, xPos: number, sideSign: number): number => {
+      const joint = ((zPos % 22) + 22) % 22;
+      const seam = joint < 0.7 ? Math.sin((joint / 0.7) * Math.PI) * 0.032 : 0;
+      // Raised lane cat's-eye reflectors at x = -3.6, 0, +3.6
+      const laneEdgeDist = Math.min(
+        Math.abs(xPos + 3.6),
+        Math.abs(xPos),
+        Math.abs(xPos - 3.6),
+      );
+      const reflector = laneEdgeDist < 0.24 ? Math.max(0, Math.sin(zPos * 4.5)) * 0.022 : 0;
+      const chatter =
+        Math.max(0, Math.sin(zPos * 1.2 + sideSign * 0.8) * 0.005 + Math.sin(zPos * 2.9) * 0.004);
+      return Math.min(0.08, (seam + reflector + chatter) * hwyBumpScale);
+    };
+
+    const hwyTargets: [number, number, number, number] = [
+      sampleHwyBump(this.playerZ + 1.42, this.playerX + 0.94, 1),
+      sampleHwyBump(this.playerZ + 1.42, this.playerX - 0.94, -1),
+      sampleHwyBump(this.playerZ - 1.38, this.playerX + 0.96, 1),
+      sampleHwyBump(this.playerZ - 1.38, this.playerX - 0.96, -1),
+    ];
+
+    const subDt = dt * 0.5;
+    for (let w = 0; w < 4; w++) {
+      let pos = this.wheelTravel[w];
+      let vel = this.wheelVel[w];
+      const target = hwyTargets[w];
+      for (let s = 0; s < 2; s++) {
+        const acc = (target - pos) * 240 - vel * 21;
+        vel += acc * subDt;
+        pos += vel * subDt;
+      }
+      this.wheelTravel[w] = Math.max(0, Math.min(0.085, pos));
+      this.wheelVel[w] = vel;
+    }
+
+    const avgHwyBump =
+      (this.wheelTravel[0] + this.wheelTravel[1] + this.wheelTravel[2] + this.wheelTravel[3]) * 0.25;
+    const targetHeave = avgHwyBump * 0.35 - (this.nitroActive ? 0.012 : 0) - wallImpact * 0.03;
+    const heaveAcc = (targetHeave - this.chassisHeave) * 145 - this.chassisHeaveVel * 14;
+    this.chassisHeaveVel += heaveAcc * dt;
+    this.chassisHeave = Math.max(-0.055, Math.min(0.035, this.chassisHeave + this.chassisHeaveVel * dt));
+
+    const frontAvg = (this.wheelTravel[0] + this.wheelTravel[1]) * 0.5;
+    const rearAvg = (this.wheelTravel[2] + this.wheelTravel[3]) * 0.5;
+    const leftAvg = (this.wheelTravel[0] + this.wheelTravel[2]) * 0.5;
+    const rightAvg = (this.wheelTravel[1] + this.wheelTravel[3]) * 0.5;
+
+    const targetPitch =
+      (this.braking ? 0.038 : this.nitroActive ? -0.048 : input.accelerate ? -0.025 : 0) +
+      (rearAvg - frontAvg) * 0.22;
+    const targetRoll = -steerInput * 0.055 + (rightAvg - leftAvg) * 0.18;
+    this.chassisPitch += (targetPitch - this.chassisPitch) * Math.min(1, dt * 11);
+    this.chassisRoll += (targetRoll - this.chassisRoll) * Math.min(1, dt * 11);
     this.drifting = input.handbrake && Math.abs(this.playerVx) > 4.5;
 
     // 4. Recycle scrolling highway chunks seamlessly ahead of player
@@ -636,7 +748,7 @@ export class HighwayRushWorld {
         this.findSafeTrafficSpawn(t, this.playerZ + 175);
       }
 
-      t.mesh.root.position.set(t.x, 0, t.z);
+      t.mesh.root.position.set(t.x, 0.014, t.z);
       for (let w = 0; w < t.mesh.wheels.length; w++) {
         t.mesh.wheels[w].rotation.x = t.wheelAngle;
       }
@@ -711,6 +823,7 @@ export class HighwayRushWorld {
 
   public dispose(): void {
     this.traffic.forEach((t) => t.mesh.dispose());
+    this.treeAssets?.dispose();
     this.geometries.forEach((g) => g.dispose());
     this.materials.forEach((m) => m.dispose());
     this.localTextures.forEach((t) => t.dispose());

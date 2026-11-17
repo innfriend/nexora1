@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { ProceduralTextureSet } from './textures';
 import { TrackSample } from './track';
+import { createUrbanTreeAssets, UrbanTreeAssetBundle } from './treeModel';
 
 export interface CitySkylinePlacement {
   x: number;
@@ -67,6 +68,7 @@ export function buildArchitecturalSkyline(
   const group = new THREE.Group();
   const geometries: THREE.BufferGeometry[] = [];
   const materials: THREE.Material[] = [];
+  let treeAssets: UrbanTreeAssetBundle | null = null;
 
   const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
     geometries.push(g);
@@ -448,58 +450,101 @@ export function buildArchitecturalSkyline(
   }
 
   if (planterCoords.length > 0) {
-    const planterGeo = trackGeo(new THREE.BoxGeometry(2.1, 0.7, 2.1));
-    const trunkGeo = trackGeo(new THREE.CylinderGeometry(0.16, 0.24, 2.4, 7));
-    const canopyGeo = trackGeo(new THREE.IcosahedronGeometry(1.55, 1));
-
-    const planterMat = trackMat(
-      new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.88, metalness: 0.08 }),
-    );
-    const trunkMat = trackMat(
-      new THREE.MeshStandardMaterial({ color: 0x3b2f2f, roughness: 0.92 }),
-    );
-    const canopyMat = trackMat(
-      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.82, metalness: 0.04 }),
+    treeAssets = createUrbanTreeAssets(textures);
+    const canopyDepthMat = trackMat(
+      new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        map: textures.treeLeafCluster,
+        alphaTest: 0.4,
+      }),
     );
 
-    const planterInst = new THREE.InstancedMesh(planterGeo, planterMat, planterCoords.length);
-    const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, planterCoords.length);
-    const canopyInst = new THREE.InstancedMesh(canopyGeo, canopyMat, planterCoords.length);
+    const planterInst = new THREE.InstancedMesh(
+      treeAssets.planterGeo,
+      treeAssets.planterMat,
+      planterCoords.length,
+    );
+    const soilInst = new THREE.InstancedMesh(
+      treeAssets.soilGeo,
+      treeAssets.soilMat,
+      planterCoords.length,
+    );
+    planterInst.castShadow = true;
+    planterInst.receiveShadow = true;
+    soilInst.receiveShadow = true;
 
-    const leafShades = [
-      new THREE.Color(0x1f5c3a),
-      new THREE.Color(0x276e44),
-      new THREE.Color(0x194d32),
-      new THREE.Color(0x2f7d4d),
-    ];
+    const groupA: Array<{ p: (typeof planterCoords)[number]; idx: number }> = [];
+    const groupB: Array<{ p: (typeof planterCoords)[number]; idx: number }> = [];
 
     planterCoords.forEach((p, idx) => {
-      dummy.position.set(p.x, p.y + 0.15, p.z);
+      // Precast concrete planter + recessed cast-iron tree grate
+      dummy.position.set(p.x, p.y - 0.12, p.z);
       dummy.rotation.set(0, p.yaw, 0);
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
       planterInst.setMatrixAt(idx, dummy.matrix);
 
-      dummy.position.set(p.x, p.y + 1.55 * p.scale, p.z);
-      dummy.scale.set(p.scale, p.scale, p.scale);
+      dummy.position.set(p.x, p.y + 0.34, p.z);
       dummy.updateMatrix();
-      trunkInst.setMatrixAt(idx, dummy.matrix);
+      soilInst.setMatrixAt(idx, dummy.matrix);
 
-      dummy.position.set(p.x, p.y + 3.45 * p.scale, p.z);
-      dummy.rotation.set(0, idx * 0.9, 0);
-      dummy.scale.set(p.scale * 1.05, p.scale * 1.22, p.scale * 1.05);
-      dummy.updateMatrix();
-      canopyInst.setMatrixAt(idx, dummy.matrix);
-      canopyInst.setColorAt(idx, leafShades[idx % leafShades.length]);
+      if (idx % 2 === 0) groupA.push({ p, idx });
+      else groupB.push({ p, idx });
     });
+
     planterInst.instanceMatrix.needsUpdate = true;
-    trunkInst.instanceMatrix.needsUpdate = true;
-    canopyInst.instanceMatrix.needsUpdate = true;
-    if (canopyInst.instanceColor) canopyInst.instanceColor.needsUpdate = true;
+    soilInst.instanceMatrix.needsUpdate = true;
     planterInst.computeBoundingSphere();
-    trunkInst.computeBoundingSphere();
-    canopyInst.computeBoundingSphere();
-    group.add(planterInst, trunkInst, canopyInst);
+    soilInst.computeBoundingSphere();
+    group.add(planterInst, soilInst);
+
+    const spawnSpeciesInstances = (
+      items: Array<{ p: (typeof planterCoords)[number]; idx: number }>,
+      variantIdx: 0 | 1,
+    ) => {
+      if (items.length === 0 || !treeAssets) return;
+      const variant = treeAssets.variants[variantIdx];
+      const barkInst = new THREE.InstancedMesh(variant.barkGeo, treeAssets.barkMat, items.length);
+      const canopyInst = new THREE.InstancedMesh(
+        variant.canopyGeo,
+        treeAssets.canopyMat,
+        items.length,
+      );
+      barkInst.castShadow = true;
+      barkInst.receiveShadow = true;
+      canopyInst.castShadow = true;
+      canopyInst.receiveShadow = true;
+      canopyInst.customDepthMaterial = canopyDepthMat;
+
+      items.forEach(({ p, idx }, i) => {
+        const yaw = p.yaw + idx * 1.37;
+        const leanX = Math.sin(idx * 2.1) * 0.035;
+        const leanZ = Math.cos(idx * 1.7) * 0.035;
+        const s = p.scale;
+
+        dummy.position.set(p.x, p.y - 0.02, p.z);
+        dummy.rotation.set(leanX, yaw, leanZ);
+        dummy.scale.set(s, s * (0.96 + (idx % 3) * 0.05), s);
+        dummy.updateMatrix();
+
+        barkInst.setMatrixAt(i, dummy.matrix);
+        canopyInst.setMatrixAt(i, dummy.matrix);
+        canopyInst.setColorAt(
+          i,
+          treeAssets!.leafTintPalette[idx % treeAssets!.leafTintPalette.length],
+        );
+      });
+
+      barkInst.instanceMatrix.needsUpdate = true;
+      canopyInst.instanceMatrix.needsUpdate = true;
+      if (canopyInst.instanceColor) canopyInst.instanceColor.needsUpdate = true;
+      barkInst.computeBoundingSphere();
+      canopyInst.computeBoundingSphere();
+      group.add(barkInst, canopyInst);
+    };
+
+    spawnSpeciesInstances(groupA, 0);
+    spawnSpeciesInstances(groupB, 1);
   }
 
   if (totemCoords.length > 0) {
@@ -531,6 +576,7 @@ export function buildArchitecturalSkyline(
   return {
     group,
     dispose: () => {
+      treeAssets?.dispose();
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());
     },
