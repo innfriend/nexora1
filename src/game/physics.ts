@@ -48,6 +48,8 @@ export interface VehicleState {
 export interface StepPhysicsResult {
   wallImpact: number; // 0..1
   skidIntensity: number; // 0..1
+  rearSmokeIntensity: number; // 0..1
+  frontSmokeIntensity: number; // 0..1
   completedLap: boolean;
   completedRace: boolean;
   wrongWay: boolean;
@@ -399,13 +401,33 @@ export function stepVehiclePhysics(
   v.chassisPitch += (targetPitch - v.chassisPitch) * Math.min(1, dt * 11);
   v.chassisRoll += (targetRoll - v.chassisRoll) * Math.min(1, dt * 11);
 
-  // Drift / skid intensity
+  // Drift / skid & high-speed tire maneuver smoke intensity
   const lateralSlip = Math.abs(lateralVel);
   const drifting = (input.handbrake && speedAbs > 9) || lateralSlip > 5.2;
   v.drifting = drifting;
   const skidIntensity = drifting
     ? Math.min(1, Math.max(lateralSlip / 14, input.handbrake ? 0.65 : 0))
     : 0;
+
+  const cornerScrub =
+    speedAbs > 18 && (lateralSlip > 2.2 || (Math.abs(v.steerVisual) > 0.2 && speedAbs > 26))
+      ? Math.min(
+          0.85,
+          Math.max(
+            (lateralSlip - 2.2) / 5.2,
+            ((Math.abs(v.steerVisual) - 0.18) / 0.24) * ((speedAbs - 24) / 36),
+          ),
+        )
+      : 0;
+  const launchSpin =
+    v.nitroActive && speedAbs > 1.5 && speedAbs < 24 ? 0.65 * (1 - speedAbs / 24) : 0;
+  const rearSmokeIntensity = Math.min(1, Math.max(skidIntensity, cornerScrub, launchSpin));
+  const frontSmokeIntensity =
+    braking && speedAbs > 22
+      ? Math.min(0.75, ((speedAbs - 22) / 36) * 0.75)
+      : lateralSlip > 6.5
+        ? Math.min(0.45, (lateralSlip - 6.5) / 8)
+        : 0;
 
   // Wrong-way detection
   const headingDotTrack = nFwdX * proj.sample.tangent.x + nFwdZ * proj.sample.tangent.z;
@@ -466,6 +488,8 @@ export function stepVehiclePhysics(
   return {
     wallImpact,
     skidIntensity,
+    rearSmokeIntensity,
+    frontSmokeIntensity,
     completedLap,
     completedRace,
     wrongWay,

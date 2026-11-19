@@ -8,6 +8,7 @@ import {
   recordDailyProgress,
 } from './dailyChallenge';
 import { getEffectiveCarSpecs, UNDERGLOW_OPTIONS } from './garageData';
+import { createMotionBlurPipeline, MotionBlurPipeline } from './motionBlur';
 import {
   computeAiInput,
   createVehicleOnGrid,
@@ -34,6 +35,7 @@ import { recordDriftKingRun, recordHighwayRushRun, recordRaceCompletion } from '
 import { DriftKingSession, DriftStepOutput } from './driftKing';
 import { HighwayRushWorld, HighwayStepResult } from './highwayRush';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
+import { TireSmokeSystem } from './tireSmoke';
 import { CityCircuit, createCityCircuit } from './track';
 import {
   CAR_LIVERIES,
@@ -58,16 +60,6 @@ import {
 interface CarActor {
   state: VehicleState;
   mesh: SportsCarMeshHandles;
-}
-
-interface SmokeParticle {
-  mesh: THREE.Mesh;
-  mat: THREE.MeshBasicMaterial;
-  vx: number;
-  vy: number;
-  vz: number;
-  life: number;
-  maxLife: number;
 }
 
 interface SparkParticle {
@@ -136,6 +128,8 @@ export class NexoraRaceEngine {
   private circuit!: CityCircuit;
   private highwayWorld!: HighwayRushWorld;
   private envRenderTarget: THREE.WebGLRenderTarget | null = null;
+  private motionBlur: MotionBlurPipeline | null = null;
+  private blurFocusVec = new THREE.Vector3();
 
   private isSoftwareGl = false;
   private disposed = false;
@@ -143,9 +137,8 @@ export class NexoraRaceEngine {
   private lastTimestamp = 0;
 
   private actors: CarActor[] = [];
-  private smokePool: SmokeParticle[] = [];
-  private smokeCursor = 0;
-  private smokeGeo!: THREE.PlaneGeometry;
+  private tireSmoke!: TireSmokeSystem;
+  private smokeEmitAccum = 0;
 
   private sparkPool: SparkParticle[] = [];
   private sparkCursor = 0;
@@ -358,21 +351,14 @@ export class NexoraRaceEngine {
     this.highwayWorld.group.visible = false;
     this.scene.add(this.highwayWorld.group);
 
-    // Soft Feathered Billboard Tire Smoke Pool (Zero-GC)
-    this.smokeGeo = new THREE.PlaneGeometry(1.15, 1.15);
-    for (let i = 0; i < 48; i++) {
-      const mat = new THREE.MeshBasicMaterial({
-        map: this.textures.smokePuff,
-        color: 0xdbeafe,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-      });
-      const m = new THREE.Mesh(this.smokeGeo, mat);
-      m.visible = false;
-      this.scene.add(m);
-      this.smokePool.push({ mesh: m, mat, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0.55 });
-    }
+    // GPU-Instanced Swirling Tire Smoke Particle System (Zero-GC, 1 draw call)
+    const sceneFog = this.scene.fog as THREE.FogExp2;
+    this.tireSmoke = new TireSmokeSystem(
+      this.textures.smokePuff,
+      sceneFog.color,
+      sceneFog.density,
+    );
+    this.scene.add(this.tireSmoke.mesh);
 
     // Persistent Asphalt Skid Mark Pool
     this.skidGeo = new THREE.PlaneGeometry(0.32, 1.25);
@@ -438,6 +424,17 @@ export class NexoraRaceEngine {
     this.spawnCars('circuit', 'normal');
 
     if (!this.isSoftwareGl) {
+      const msaaSamples =
+        this.settings.quality === 'high' ? 4 : this.settings.quality === 'medium' ? 2 : 0;
+      this.motionBlur = createMotionBlurPipeline(
+        this.renderer,
+        this.scene,
+        this.camera,
+        width,
+        height,
+        this.renderer.getPixelRatio(),
+        msaaSamples,
+      );
       this.renderer.compile(this.scene, this.camera);
     }
 
@@ -470,6 +467,7 @@ export class NexoraRaceEngine {
 
     this.renderer.setPixelRatio(maxRatio);
     this.renderer.setSize(width, height);
+    this.motionBlur?.setSize(width, height, maxRatio);
     this.renderer.shadowMap.enabled = !this.isSoftwareGl && this.settings.quality !== 'low';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -804,10 +802,8 @@ export class NexoraRaceEngine {
     this.lastGhostSampleTimeMs = -999;
 
     // Reset transient effects pools
-    this.smokePool.forEach((p) => {
-      p.life = 0;
-      p.mesh.visible = false;
-    });
+    this.tireSmoke?.clear();
+    this.smokeEmitAccum = 0;
     this.sparkPool.forEach((s) => {
       s.life = 0;
       s.mesh.visible = false;
@@ -834,6 +830,8 @@ export class NexoraRaceEngine {
         maxCombo: 1,
         wallImpact: 0,
         skidIntensity: 0,
+        rearSmokeIntensity: 0,
+        frontSmokeIntensity: 0,
         crashed: false,
         eventBanner: null,
         nitroRatio: 1,
@@ -943,10 +941,8 @@ export class NexoraRaceEngine {
     }
     this.clearInputs();
     this.hideSpeedStreaks();
-    this.smokePool.forEach((p) => {
-      p.life = 0;
-      p.mesh.visible = false;
-    });
+    this.tireSmoke?.clear();
+    this.smokeEmitAccum = 0;
     this.sparkPool.forEach((s) => {
       s.life = 0;
       s.mesh.visible = false;
@@ -991,10 +987,8 @@ export class NexoraRaceEngine {
     this.broadcastSampleHint = undefined;
     this.clearInputs();
 
-    this.smokePool.forEach((p) => {
-      p.life = 0;
-      p.mesh.visible = false;
-    });
+    this.tireSmoke?.clear();
+    this.smokeEmitAccum = 0;
     this.hideSpeedStreaks();
 
     const first = sampleReplayAtTime(recording, 0);
@@ -1071,6 +1065,7 @@ export class NexoraRaceEngine {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    this.motionBlur?.setSize(width, height, this.renderer.getPixelRatio());
   };
 
   private scheduleNextTick(): void {
@@ -1114,9 +1109,58 @@ export class NexoraRaceEngine {
     const dt = Math.min(0.05, Math.max(0.001, rawDt));
 
     this.update(dt);
-    this.renderer.render(this.scene, this.camera);
+    this.updateMotionBlur(dt);
+    if (this.motionBlur && !this.isSoftwareGl) {
+      this.motionBlur.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
     this.scheduleNextTick();
   };
+
+  private updateMotionBlur(dt: number): void {
+    if (!this.motionBlur) return;
+
+    const blurAllowed =
+      this.phase === 'racing' ||
+      this.phase === 'finished' ||
+      (this.phase === 'replay' && this.replayPlaying && this.replayCameraMode === 'chase');
+
+    const focusVehicle =
+      this.activeGameTitle === 'highway-rush'
+        ? this.highwayPlayerProxy
+        : (this.actors.find((a) => a.state.isPlayer)?.state ?? this.actors[0]?.state);
+
+    let focusX = 0.5;
+    let focusY = 0.43;
+    if (focusVehicle) {
+      this.camera.updateMatrixWorld();
+      this.blurFocusVec.set(focusVehicle.x, focusVehicle.y + 0.65, focusVehicle.z);
+      this.blurFocusVec.project(this.camera);
+      if (this.blurFocusVec.z < 1) {
+        focusX = this.blurFocusVec.x * 0.5 + 0.5;
+        focusY = this.blurFocusVec.y * 0.5 + 0.5;
+      }
+    }
+
+    const activeSpeed =
+      blurAllowed && focusVehicle
+        ? focusVehicle.speed * (this.phase === 'replay' ? this.replaySpeed : 1)
+        : 0;
+    const lateralSweep = focusVehicle
+      ? focusVehicle.steerVisual * 1.35 + (focusVehicle.drifting ? Math.sign(focusVehicle.steerVisual) * 0.35 : 0)
+      : 0;
+
+    this.motionBlur.update({
+      speedMs: activeSpeed,
+      nitroActive: Boolean(blurAllowed && focusVehicle?.nitroActive),
+      lateralRate: lateralSweep,
+      focusX,
+      focusY,
+      enabled: blurAllowed,
+      dt,
+    });
+  }
 
   private update(dt: number): void {
     if (this.phase === 'menu') {
@@ -1392,10 +1436,14 @@ export class NexoraRaceEngine {
 
       if (actor.state.isPlayer && this.phase === 'racing') {
         playerStepResult = res;
-        if (actor.state.drifting && Math.abs(actor.state.speed) > 10) {
-          this.spawnTireSmoke(actor.state);
+        if (res.rearSmokeIntensity > 0.12 || res.frontSmokeIntensity > 0.15) {
+          this.emitTireSmoke(actor.state, res.rearSmokeIntensity, res.frontSmokeIntensity, dt, true);
+        }
+        if ((actor.state.drifting || res.rearSmokeIntensity > 0.55) && Math.abs(actor.state.speed) > 10) {
           this.spawnSkidMark(actor.state);
         }
+      } else if (!actor.state.isPlayer && this.phase === 'racing' && res.rearSmokeIntensity > 0.36) {
+        this.emitTireSmoke(actor.state, res.rearSmokeIntensity * 0.65, 0, dt, false);
       }
     }
 
@@ -1415,7 +1463,7 @@ export class NexoraRaceEngine {
       }
     }
 
-    this.updateSmokeParticles(dt);
+    this.tireSmoke.update(dt);
     this.updateSparkParticles(dt);
 
     const player = this.actors.find((a) => a.state.isPlayer);
@@ -1620,8 +1668,16 @@ export class NexoraRaceEngine {
       const hero = this.actors[0];
       if (hero) {
         this.syncCarTransform(this.highwayPlayerProxy, hero.mesh);
+        if (hRes.rearSmokeIntensity > 0.12 || hRes.frontSmokeIntensity > 0.15) {
+          this.emitTireSmoke(
+            this.highwayPlayerProxy,
+            hRes.rearSmokeIntensity,
+            hRes.frontSmokeIntensity,
+            dt,
+            true,
+          );
+        }
         if (this.highwayPlayerProxy.drifting && Math.abs(this.highwayPlayerProxy.speed) > 10) {
-          this.spawnTireSmoke(this.highwayPlayerProxy);
           this.spawnSkidMark(this.highwayPlayerProxy);
         }
       }
@@ -1643,7 +1699,7 @@ export class NexoraRaceEngine {
     }
 
     const nitroNow = this.phase === 'racing' && (this.lastHighwayResult?.nitroActive ?? false);
-    this.updateSmokeParticles(dt);
+    this.tireSmoke.update(dt);
     this.updateSparkParticles(dt);
     this.updateChaseCamera(this.highwayPlayerProxy, dt);
     this.updateSpeedStreaks(
@@ -2093,28 +2149,70 @@ export class NexoraRaceEngine {
     this.dirLight.target.updateMatrixWorld();
   }
 
-  private spawnTireSmoke(v: VehicleState): void {
+  private emitTireSmoke(
+    v: VehicleState,
+    rearIntensity: number,
+    frontIntensity: number,
+    dt: number,
+    isPlayer: boolean,
+  ): void {
     const fwdX = Math.sin(v.heading);
     const fwdZ = Math.cos(v.heading);
     const rightX = -Math.cos(v.heading);
     const rightZ = Math.sin(v.heading);
 
-    [-0.92, 0.92].forEach((side) => {
-      const p = this.smokePool[this.smokeCursor];
-      this.smokeCursor = (this.smokeCursor + 1) % this.smokePool.length;
-      p.life = p.maxLife;
-      p.mesh.visible = true;
-      p.mesh.position.set(
-        v.x - fwdX * 1.42 + rightX * side,
-        v.y + 0.34,
-        v.z - fwdZ * 1.42 + rightZ * side,
-      );
-      p.mesh.scale.setScalar(0.6);
-      p.mat.opacity = 0.45;
-      p.vx = (Math.random() - 0.5) * 1.5;
-      p.vy = 0.75 + Math.random() * 0.85;
-      p.vz = (Math.random() - 0.5) * 1.5;
-    });
+    // Frame-rate independent particle emission cadence
+    const peak = Math.max(rearIntensity, frontIntensity);
+    let bursts = 1;
+    if (isPlayer) {
+      this.smokeEmitAccum += dt * (28 + peak * 58);
+      if (this.smokeEmitAccum < 1) return;
+      bursts = Math.min(3, Math.floor(this.smokeEmitAccum));
+      this.smokeEmitAccum -= bursts;
+    } else if (Math.random() > 0.45) {
+      return;
+    }
+
+    // Wake velocity drifts backward & sideways opposite wheel slip
+    const wakeSpeed = Math.min(18, Math.abs(v.speed) * 0.16);
+    const wakeVx = v.vx * 0.22 - fwdX * wakeSpeed;
+    const wakeVz = v.vz * 0.22 - fwdZ * wakeSpeed;
+
+    for (let b = 0; b < bursts; b++) {
+      if (rearIntensity > 0.12) {
+        for (let s = 0; s < 2; s++) {
+          const side = s === 0 ? -0.94 : 0.94;
+          const jitterX = (Math.random() - 0.5) * 0.24;
+          const jitterZ = (Math.random() - 0.5) * 0.24;
+          this.tireSmoke.emit(
+            v.x - fwdX * 1.42 + rightX * side + jitterX,
+            v.y + 0.24 + v.wheelTravel[s + 2] + Math.random() * 0.12,
+            v.z - fwdZ * 1.42 + rightZ * side + jitterZ,
+            wakeVx + rightX * side * 0.85 + (Math.random() - 0.5) * 1.6,
+            0.85 + rearIntensity * 1.15 + Math.random() * 0.65,
+            wakeVz + rightZ * side * 0.85 + (Math.random() - 0.5) * 1.6,
+            rearIntensity,
+            v.nitroActive,
+          );
+        }
+      }
+
+      if (frontIntensity > 0.16 && b === 0) {
+        for (let s = 0; s < 2; s++) {
+          const side = s === 0 ? -0.92 : 0.92;
+          this.tireSmoke.emit(
+            v.x + fwdX * 1.38 + rightX * side + (Math.random() - 0.5) * 0.18,
+            v.y + 0.22 + v.wheelTravel[s] + Math.random() * 0.1,
+            v.z + fwdZ * 1.38 + rightZ * side + (Math.random() - 0.5) * 0.18,
+            wakeVx + rightX * side * 0.65 + (Math.random() - 0.5) * 1.2,
+            0.65 + frontIntensity * 0.8 + Math.random() * 0.45,
+            wakeVz + rightZ * side * 0.65 + (Math.random() - 0.5) * 1.2,
+            frontIntensity * 0.85,
+            false,
+          );
+        }
+      }
+    }
   }
 
   private spawnSkidMark(v: VehicleState): void {
@@ -2154,26 +2252,6 @@ export class NexoraRaceEngine {
       s.vy = 3.0 + Math.random() * 6.5;
       s.vz = (Math.random() - 0.5) * 14;
       s.mesh.rotation.set(Math.random() * 3, Math.random() * 3, 0);
-    }
-  }
-
-  private updateSmokeParticles(dt: number): void {
-    for (let i = 0; i < this.smokePool.length; i++) {
-      const p = this.smokePool[i];
-      if (p.life <= 0) continue;
-      p.life -= dt;
-      if (p.life <= 0) {
-        p.mesh.visible = false;
-        p.mat.opacity = 0;
-        continue;
-      }
-      p.mesh.position.x += p.vx * dt;
-      p.mesh.position.y += p.vy * dt;
-      p.mesh.position.z += p.vz * dt;
-      p.mesh.quaternion.copy(this.camera.quaternion);
-      const age = 1 - p.life / p.maxLife;
-      p.mesh.scale.setScalar(0.6 + age * 2.3);
-      p.mat.opacity = 0.45 * (1 - age);
     }
   }
 
@@ -2344,7 +2422,7 @@ export class NexoraRaceEngine {
     if (!sampled) return;
 
     this.applyReplaySample(sampled, dt, false);
-    this.updateSmokeParticles(dt);
+    this.tireSmoke.update(dt * (this.replayPlaying ? this.replaySpeed : 0));
     this.updateSparkParticles(dt);
 
     const playerSnap = sampled.vehicles.find((v) => v.id === 'player') ?? sampled.vehicles[0];
@@ -2410,9 +2488,26 @@ export class NexoraRaceEngine {
         playerSnap = snap;
       }
 
-      if (this.replayPlaying && snap.drifting && Math.abs(snap.speed) > 10) {
-        this.spawnTireSmoke(actor.state);
-        this.spawnSkidMark(actor.state);
+      if (this.replayPlaying) {
+        const speedAbs = Math.abs(snap.speed);
+        const cornerScrub =
+          Math.abs(snap.steerVisual) > 0.2 && speedAbs > 26
+            ? Math.min(0.7, ((Math.abs(snap.steerVisual) - 0.18) / 0.24) * ((speedAbs - 24) / 36))
+            : 0;
+        const rearReplaySmoke = snap.drifting && speedAbs > 9 ? 0.85 : cornerScrub;
+        const frontReplaySmoke = snap.braking && speedAbs > 24 ? 0.55 : 0;
+        if (rearReplaySmoke > 0.14 || frontReplaySmoke > 0.15) {
+          this.emitTireSmoke(
+            actor.state,
+            rearReplaySmoke,
+            frontReplaySmoke,
+            dt * this.replaySpeed,
+            snap.id === 'player',
+          );
+        }
+        if (snap.drifting && speedAbs > 10) {
+          this.spawnSkidMark(actor.state);
+        }
       }
     });
 
@@ -2558,14 +2653,14 @@ export class NexoraRaceEngine {
     this.circuit?.dispose();
     this.highwayWorld?.dispose();
     this.textures?.dispose();
-    this.smokeGeo?.dispose();
-    this.smokePool.forEach((p) => p.mat.dispose());
+    this.tireSmoke?.dispose();
     this.skidGeo?.dispose();
     this.skidMat?.dispose();
     this.sparkGeo?.dispose();
     this.sparkMat?.dispose();
     this.streakGeo?.dispose();
     this.streakMat?.dispose();
+    this.motionBlur?.dispose();
     this.envRenderTarget?.dispose();
   }
 }

@@ -37,6 +37,8 @@ export interface HighwayStepResult {
   maxCombo: number;
   wallImpact: number;
   skidIntensity: number;
+  rearSmokeIntensity: number;
+  frontSmokeIntensity: number;
   crashed: boolean;
   eventBanner: string | null;
   nitroRatio: number;
@@ -803,6 +805,18 @@ export class HighwayRushWorld {
       this.score += speedBonusRate * this.comboMultiplier * oncomingMult * dt;
     }
 
+    const swerveScrub =
+      Math.abs(this.playerVx) > 5.8 && this.playerSpeed > 24
+        ? Math.min(0.82, ((Math.abs(this.playerVx) - 5.8) / 8.5) * Math.min(1, this.playerSpeed / 46))
+        : 0;
+    const hwyLaunchSpin =
+      this.nitroActive && this.playerSpeed < 29 ? 0.55 * (1 - this.playerSpeed / 29) : 0;
+    const rearSmokeIntensity = Math.min(1, Math.max(this.drifting ? 0.85 : 0, swerveScrub, hwyLaunchSpin));
+    const frontSmokeIntensity =
+      this.braking && this.playerSpeed > 26
+        ? Math.min(0.7, ((this.playerSpeed - 26) / 38) * 0.7)
+        : 0;
+
     return {
       score: Math.round(this.score),
       distanceKm: this.playerZ / 1000,
@@ -812,6 +826,8 @@ export class HighwayRushWorld {
       maxCombo: this.maxCombo,
       wallImpact,
       skidIntensity: this.drifting ? 0.65 : 0,
+      rearSmokeIntensity,
+      frontSmokeIntensity,
       crashed: this.crashed,
       eventBanner,
       nitroRatio: this.nitroCapacity > 0 ? Math.max(0, Math.min(1, this.nitroAmount / this.nitroCapacity)) : 0,
